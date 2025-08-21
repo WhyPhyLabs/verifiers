@@ -28,6 +28,7 @@ from .envs.environment import Environment
 from .envs.multiturn_env import MultiTurnEnv
 from .envs.singleturn_env import SingleTurnEnv
 from .envs.tool_env import ToolEnv
+from .envs.terminalbench_env import TerminalBenchEnv
 from .parsers.parser import Parser
 from .parsers.think_parser import ThinkParser
 from .parsers.xml_parser import XMLParser
@@ -35,6 +36,7 @@ from .rubrics.judge_rubric import JudgeRubric
 from .rubrics.rubric import Rubric
 from .rubrics.rubric_group import RubricGroup
 from .rubrics.tool_rubric import ToolRubric
+from .rubrics.terminalbench_rubric import TerminalBenchRubric
 from .utils.data_utils import (
     extract_boxed_answer,
     extract_hash_answer,
@@ -109,6 +111,7 @@ __all__ = [
     "MultiTurnEnv",
     "SingleTurnEnv",
     "ToolEnv",
+    "TerminalBenchEnv",
     "EnvGroup",
     "extract_boxed_answer",
     "extract_hash_answer",
@@ -116,6 +119,11 @@ __all__ = [
     "setup_logging",
     "load_environment",
 ]
+
+# Additional exports for optional integrations
+__all__.extend([
+    "TerminalBenchRubric",
+])
 
 # Add trainer exports only if trl is available
 if _HAS_TRL:
