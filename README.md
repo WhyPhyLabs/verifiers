@@ -16,6 +16,14 @@ Verifiers is a library of modular components for creating RL environments and tr
 
 Full documentation is available [here](https://verifiers.readthedocs.io/en/latest/). 
 
+### New: Terminal-Bench Adapter
+
+An adapter for Terminal-Bench tasks is available via `verifiers.envs.TerminalBenchEnv` and `verifiers.integrations.terminalbench`.
+
+- Example environment: `environments/vf_terminal_bench`
+- Stub quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"stub","expected_command":"echo hello"}' -n 1 -r 1`
+- Harness quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"word2vec-from-scratch","dataset_path":"/path/to/terminal-bench/tasks"}' -n 1 -r 1`
+- See `docs/terminalbench_integration.md` for details.
 ## Setup
 
 We recommend using `verifiers` with along [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management in your own project:
@@ -283,5 +291,4 @@ If you use this code in your research, please cite:
 - Default patterns for hosted resources such as code sandboxes, auxiliary models, and MCP servers
 - Multimodal input support
 - Non-increasing token sequences via REINFORCE
-
 
