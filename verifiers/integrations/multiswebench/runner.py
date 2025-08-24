@@ -205,6 +205,7 @@ class HarnessRunner:
         # Build harness config for a single instance
         log_dir = Path(self.output_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        inst_harness_id = f"{item['org']}/{item['repo']}:pr-{item['number']}"
         cfg = {
             "mode": "evaluation",
             "workdir": self.workdir,
@@ -212,7 +213,7 @@ class HarnessRunner:
             "dataset_files": [self.dataset_file],
             "force_build": self.force_build,
             "output_dir": self.output_dir,
-            "specifics": [inst_id],
+            "specifics": [inst_harness_id],
             "skips": [],
             "repo_dir": self.repo_dir,
             "need_clone": True,
