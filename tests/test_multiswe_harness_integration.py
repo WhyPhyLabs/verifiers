@@ -66,3 +66,4 @@ def test_multiswe_harness_runner_smoke(mock_openai_client):
         max_concurrent=1,
     )
     assert len(results.reward) == 1
+    assert results.reward[0] == 1.0
