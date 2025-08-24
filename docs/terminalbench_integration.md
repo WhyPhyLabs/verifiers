@@ -29,3 +29,9 @@ Testing:
 | `TB_DATASET_PATH` | Yes (harness) | Path to Terminal‑Bench tasks directory |
 | `TB_TASK_ID` | Yes | Task id |
 | `TB_ENTRYPOINT` | Yes (harness) | Harness entrypoint module (e.g., `terminal_bench.run`) |
+
+Notes
+- When `use_harness=true`, you must provide `dataset_path`. The loader fails fast
+  with a clear error if `use_harness=true` and `dataset_path` is missing.
+- The harness runner enforces a default timeout of 1800s; for programmatic use of
+  the runner class you can override `timeout_sec` if your hardware is slower.

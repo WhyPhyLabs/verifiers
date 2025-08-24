@@ -47,3 +47,10 @@ Testing:
 | `OPENHANDS_ENTRYPOINT` | Yes (OpenHands) | Module path, e.g. `mopenhands.run` |
 
 Back‑compat aliases are preserved; the `openhands_entrypoint` takes precedence over `entrypoint_module`.
+
+Notes
+- When `use_openhands=true`, you must provide both `dataset_file` and
+  `OPENHANDS_ENTRYPOINT`. The environment loader fails fast with a clear error if
+  either is missing to prevent accidental fallbacks.
+- Both official and OpenHands runners enforce a default timeout of 1800s; for
+  programmatic use you can override `timeout_sec` on the runner.
