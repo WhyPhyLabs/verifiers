@@ -56,10 +56,10 @@ class MultiSWEEnv(MultiTurnEnv):
     def _append_tool_observation(self, messages: list[dict[str, Any]], obs: str) -> None:
         messages.append({"role": "tool", "content": obs, "name": "tests"})
 
-    def is_completed(self, messages: Messages, state: State) -> bool:  # noqa: ARG002
+    def is_completed(self, messages: Messages, state: State, **kwargs) -> bool:  # noqa: ARG002
         return bool(state.get("done") or state.get("turn", 0) >= self.max_turns)
 
-    def env_response(self, messages: Messages, state: State) -> tuple[Messages, State]:
+    def env_response(self, messages: Messages, state: State, **kwargs) -> tuple[Messages, State]:
         st = self.setup_state(state)
         st["turn"] = st.get("turn", 0) + 1
         patch_text = self._extract_patch(messages)
@@ -73,4 +73,3 @@ class MultiSWEEnv(MultiTurnEnv):
             msgs = [{"role": "user", "content": str(messages)}]
         self._append_tool_observation(msgs, result.observation)
         return msgs, st
-
