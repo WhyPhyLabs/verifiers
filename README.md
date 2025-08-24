@@ -21,9 +21,18 @@ Full documentation is available [here](https://verifiers.readthedocs.io/en/lates
 An adapter for Terminal-Bench tasks is available via `verifiers.envs.TerminalBenchEnv` and `verifiers.integrations.terminalbench`.
 
 - Example environment: `environments/vf_terminal_bench`
-- Quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"stub","expected_command":"echo hello"}' -n 1 -r 1`
-- See `docs/terminalbench_integration.md` for details.
+- Stub quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"stub","expected_command":"echo hello"}' -n 1 -r 1`
+- Harness quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"word2vec-from-scratch","dataset_path":"/path/to/terminal-bench/tasks"}' -n 1 -r 1` (requires an out-of-tree harness runner implementation; otherwise falls back to stub)
+  - See `docs/terminalbench_integration.md` for details.
 
+### New: Multi‑SWE‑Bench Adapter
+
+An adapter for Multi‑SWE‑Bench program‑repair tasks is available via `verifiers.envs.MultiSWEEnv`
+and `verifiers.integrations.multiswebench`.
+
+  - Example environment: `environments/vf_multi_swe_bench`
+  - Quickstart (stub): `uv run vf-eval vf-multi-swe-bench -a '{"instance_id":"stub-task","expected_token":"FIX_PATCH"}' -n 1 -r 1`
+  - See `docs/multiswebench_integration.md` for details.
 ## Setup
 
 We recommend using `verifiers` with along [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management in your own project:
@@ -192,4 +201,106 @@ class YourMultiTurnEnv(vf.MultiTurnEnv):
     # return new environment message(s) + updated state
 ```
 
+<<<<<<< HEAD
 If your application requires more fine-grained control than is allowed by `MultiTurnEnv`, you may want to inherit from the base `Environment` functionality directly and override the `rollo
+=======
+If your application requires more fine-grained control than is allowed by `MultiTurnEnv`, you may want to inherit from the base `Environment` functionality directly and override the `rollout` method.
+
+
+## Training
+
+
+### GRPOTrainer
+
+The included trainer (`vf.GRPOTrainer`) supports running GRPO-style RL training via Accelerate/DeepSpeed, and uses vLLM for inference. It supports both full-parameter finetuning, and is optimized for efficiently training dense transformer models on 2-16 GPUs.
+
+```bash
+# install environment
+vf-install vf-wordle (-p /path/to/environments | --from-repo)
+
+# quick eval
+vf-eval vf-wordle -m (model_name in configs/endpoints.py) -n NUM_EXAMPLES -r ROLLOUTS_PER_EXAMPLE
+
+# inference (shell 0)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 vf-vllm --model willcb/Qwen3-1.7B-Wordle \
+    --data-parallel-size 7 --enforce-eager --disable-log-requests
+
+# training (shell 1)
+CUDA_VISIBLE_DEVICES=6,7 accelerate launch --num-processes 2 \
+    --config-file configs/zero3.yaml examples/grpo/train_wordle.py --size 1.7B
+```
+
+Alternatively, you can train environments with the external `prime-rl` project (FSDP-first orchestration). See the `prime-rl` README for installation and examples. For example:
+
+```toml
+# orchestrator config (prime-rl)
+[environment]
+id = "vf-math-python"  # or your environment ID
+```
+
+```bash
+# run (prime-rl)
+uv run rl \
+  --trainer @ configs/your_exp/train.toml \
+  --orchestrator @ configs/your_exp/orch.toml \
+  --inference @ configs/your_exp/infer.toml
+```
+
+### Troubleshooting 
+- Ensure your `wandb` and `huggingface-cli` logins are set up (or set `report_to=None` in `training_args`). You should also have something set as your `OPENAI_API_KEY` in your environment (can be a dummy key for vLLM). 
+- If using high max concurrency, increase the number of allowed open sockets (e.g. `ulimit -n 4096`)
+- On some setups, inter-GPU communication can [hang](https://github.com/huggingface/trl/issues/2923) or crash during vLLM weight syncing. This can usually be alleviated by setting (or unsetting) `NCCL_P2P_DISABLE=1` in your environment (or potentially `NCCL_CUMEM_ENABLE=1`). Try this as your first step if you experience NCCL-related issues.
+- If problems persist, please open an [issue](https://github.com/willccbb/verifiers/issues).
+
+### Resource Requirements
+`GRPOTrainer` is optimized for setups with at least 2 GPUs, scaling up to multiple nodes. 2-GPU setups with sufficient memory to enable small-scale experimentation can be [rented](https://app.primeintellect.ai/dashboard/create-cluster?image=ubuntu_22_cuda_12) for <$1/hr.
+
+### PRIME-RL
+If you do not require LoRA support, you may want to use the `prime-rl` trainer, which natively supports Environments created using `verifiers`, is more optimized for performance and scalability via FSDP, includes a broader set of configuration options and user experience features, and has more battle-tested defaults. Both trainers support asynchronous rollouts, and use a one-step off-policy delay by default for overlapping training and inference. See the `prime-rl` [docs](https://github.com/PrimeIntellect-ai/prime-rl) for usage instructions.
+
+## Further Documentation
+
+See the full [docs](https://verifiers.readthedocs.io/en/latest/) for more info, including:
+- Dataset configuration options (system prompts, few-shot examples, eval datasets)
+- Parsers (e.g. ThinkParser, XMLParser)
+- Advanced Rubric patterns
+- Composing Environments (EnvGroup) and Rubrics (RubricGroup)
+- Creating and saving rollout datasets using Environments
+- More Environment example walkthroughs
+- Hardware considerations
+- SFT warmup for improving small-model training efficiency
+- RL + GRPO best practices
+- Common footguns
+
+## Footguns
+
+**Non-Increasing Chat Templates:** The Qwen3 and DeepSeek-R1 model series both remove `<think>` sections from messages when processing inputs, which violates the increasing context requirement for multi-turn GRPO-style training. We provide versions of many of these models with modified chat templates [here](https://huggingface.co/collections/willcb/qwen3-68434f4883925bfdb4570ee5).
+
+## Contributions
+
+Verifiers warmly welcomes community contributions! Please open an issue or PR if you encounter bugs or other pain points during your development, or start a discussion for more open-ended questions.
+
+Please note that the core `verifiers/` library is intended to be a relatively lightweight set of reusable components rather than an exhaustive catalog of RL environments. For *applications* of `verifiers` (e.g. "an Environment for XYZ task"), you are welcome to submit a PR for a self-contained module that lives within `environments/` if it serves as a canonical example of a new pattern. Stay tuned for more info shortly about our plans for supporting community Environment contributions 🙂
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@misc{brown_verifiers_2025,
+  author       = {William Brown},
+  title        = {{Verifiers}: Reinforcement Learning with LLMs in Verifiable Environments},
+  howpublished = {\url{https://github.com/willccbb/verifiers}},
+  note         = {Commit abcdefg • accessed DD Mon YYYY},
+  year         = {2025}
+}
+```
+
+
+## Roadmap
+
+- A community Environments hub for crowdsourcing, sharing, and discovering new RL environments built with `verifiers`
+- Default patterns for hosted resources such as code sandboxes, auxiliary models, and MCP servers
+- Multimodal input support
+- Non-increasing token sequences via REINFORCE
+>>>>>>> feature/terminalbench-env
