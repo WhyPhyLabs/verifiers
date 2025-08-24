@@ -7,4 +7,4 @@ Production deployments should provide a concrete runner implementation that
 speaks to the Terminal-Bench harness (e.g., via MCP, Python API, or REST).
 """
 
-from .runner import TerminalBenchRunner, StubRunner, StepResult  # noqa: F401
+from .runner import TerminalBenchRunner, StubRunner, StepResult, HarnessRunner  # noqa: F401
