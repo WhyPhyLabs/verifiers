@@ -37,3 +37,13 @@ Notes:
 
 Testing:
 - Smoke test: add `-k multiswe` to run stub‑based tests, or set env‑vars to opt‑in to integration tests in your CI.
+
+## Environment variables (for harness runs and integration tests)
+
+| Variable | Required | Description |
+|---------|----------|-------------|
+| `MSB_DATASET_FILE` | Yes (harness) | Path to dataset JSONL shard |
+| `MSB_INSTANCE_ID` or `MSB_TASK_ID` | Yes | Instance/task id `<org>__<repo>-<number>` |
+| `OPENHANDS_ENTRYPOINT` | Yes (OpenHands) | Module path, e.g. `mopenhands.run` |
+
+Back‑compat aliases are preserved; the `openhands_entrypoint` takes precedence over `entrypoint_module`.

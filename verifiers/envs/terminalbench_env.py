@@ -45,6 +45,11 @@ class TerminalBenchEnv(MultiTurnEnv):
         return st
 
     def _extract_command(self, messages: Messages) -> str:
+        """Return the assistant's latest message content as a shell command.
+
+        For chat style, take last assistant content; fall back to first non-empty
+        line. Behavior unchanged; this documents the heuristic used by the adapter.
+        """
         # For chat style, take last assistant content as the command (first line)
         if isinstance(messages, list) and messages:
             last = messages[-1]

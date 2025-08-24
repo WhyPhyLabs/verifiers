@@ -21,3 +21,11 @@ Production usage:
 Testing:
 - Smoke test: `tests/test_terminalbench_env.py` validates end-to-end flow with `MockOpenAIClient`.
 - Run: `uv run pytest -k terminalbench -q`.
+
+## Environment variables (for harness runs and integration tests)
+
+| Variable | Required | Description |
+|---------|----------|-------------|
+| `TB_DATASET_PATH` | Yes (harness) | Path to Terminal‑Bench tasks directory |
+| `TB_TASK_ID` | Yes | Task id |
+| `TB_ENTRYPOINT` | Yes (harness) | Harness entrypoint module (e.g., `terminal_bench.run`) |
