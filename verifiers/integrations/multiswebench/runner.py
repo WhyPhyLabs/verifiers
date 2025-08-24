@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 
@@ -90,6 +91,7 @@ class HarnessRunner:
         cache_level: str = "env",
         log_level: str = "INFO",
         extra_env: dict[str, str] | None = None,
+        timeout_sec: int = 1800,
     ) -> None:
         self.dataset_file = str(dataset_file)
         self.workdir = str(workdir or Path("./msb_work").absolute())
@@ -100,6 +102,7 @@ class HarnessRunner:
         self.cache_level = cache_level
         self.log_level = log_level
         self.extra_env = extra_env or {}
+        self.timeout_sec = timeout_sec
 
         Path(self.workdir).mkdir(parents=True, exist_ok=True)
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -129,7 +132,7 @@ class HarnessRunner:
             cfg_path = Path(td) / "config.json"
             cfg_path.write_text(json.dumps(config), encoding="utf-8")
             cmd = [
-                shutil.which("python") or "python",
+                sys.executable,
                 "-m",
                 "multi_swe_bench.harness.run_evaluation",
                 "--config",
@@ -137,14 +140,23 @@ class HarnessRunner:
             ]
             env = os.environ.copy()
             env.update(self.extra_env)
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env,
-            )
-            out = proc.stdout
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    timeout=self.timeout_sec,
+                )
+                out = proc.stdout
+                if proc.returncode != 0:
+                    # Treat non-zero return as failure and surface tail
+                    tail = out[-2000:] if out else ""
+                    return False, f"Harness exited with code {proc.returncode}.\n{tail}"
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout or "") + (e.stderr or "")
+                return False, f"Harness timed out after {self.timeout_sec}s.\n{out[-2000:]}"
 
             # Robust success detection: prefer final_report.json in output_dir
             resolved = False
@@ -276,6 +288,7 @@ class OpenHandsRunner(HarnessRunner):
         force_build: bool = False,
         log_level: str = "INFO",
         extra_env: dict[str, str] | None = None,
+        timeout_sec: int = 1800,
     ) -> None:
         super().__init__(
             dataset_file=dataset_file,
@@ -287,6 +300,7 @@ class OpenHandsRunner(HarnessRunner):
             cache_level="env",
             log_level=log_level,
             extra_env=extra_env,
+            timeout_sec=timeout_sec,
         )
         self.entrypoint_module = entrypoint_module
         self.entrypoint_args = entrypoint_args or []
@@ -296,7 +310,7 @@ class OpenHandsRunner(HarnessRunner):
             cfg_path = Path(td) / "config.json"
             cfg_path.write_text(json.dumps(config), encoding="utf-8")
             cmd = [
-                shutil.which("python") or "python",
+                sys.executable,
                 "-m",
                 self.entrypoint_module,
                 "--config",
@@ -305,14 +319,22 @@ class OpenHandsRunner(HarnessRunner):
             ]
             env = os.environ.copy()
             env.update(self.extra_env)
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env,
-            )
-            out = proc.stdout
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    timeout=self.timeout_sec,
+                )
+                out = proc.stdout
+                if proc.returncode != 0:
+                    tail = out[-2000:] if out else ""
+                    return False, f"OpenHands harness exited with code {proc.returncode}.\n{tail}"
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout or "") + (e.stderr or "")
+                return False, f"OpenHands harness timed out after {self.timeout_sec}s.\n{out[-2000:]}"
 
             resolved = False
             final_report = Path(self.output_dir) / "final_report.json"
