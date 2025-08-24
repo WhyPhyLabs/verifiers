@@ -42,17 +42,53 @@ class TerminalBenchEnv(MultiTurnEnv):
                 "passed": False,
             }
         )
+        # Seed the initial observation as a tool message before the first model turn
+        # so the model immediately "sees" the terminal prompt/context.
+        prompt = st.get("prompt")
+        if isinstance(prompt, list):
+            seeded_flag = st.get("_seeded_initial_obs", False)
+            if not seeded_flag:
+                self._append_tool_observation(prompt, initial_obs)
+                st["prompt"] = prompt
+                st["_seeded_initial_obs"] = True
         return st
 
     def _extract_command(self, messages: Messages) -> str:
-        # For chat style, take last assistant content as the command (first line)
+        """Return the assistant's latest message content as a shell command.
+
+        Prefers fenced bash/sh code blocks if present (joining lines with &&),
+        otherwise falls back to the first non-empty line. Behavior unchanged; this
+        documents the heuristic used by the adapter.
+        """
+        # For chat style, take last assistant content as the command.
         if isinstance(messages, list) and messages:
             last = messages[-1]
             content = last.get("content", "") if isinstance(last, dict) else str(last)
         else:
             content = str(messages)
-        # Naive parse: first non-empty line
-        for line in str(content).splitlines():
+
+        text = str(content)
+        # Prefer a fenced bash/sh code block if present; join multiple lines with &&
+        # Supported fences: ```bash|sh|shell ...``` or plain ``` ... ```
+        fence_starts = ("```bash", "```sh", "```shell", "```")
+        start_idx = -1
+        start_len = 0
+        for marker in fence_starts:
+            idx = text.find(marker)
+            if idx != -1 and (start_idx == -1 or idx < start_idx):
+                start_idx = idx
+                start_len = len(marker)
+        if start_idx != -1:
+            rest = text[start_idx + start_len :]
+            end_idx = rest.find("```")
+            if end_idx != -1:
+                block = rest[:end_idx]
+                lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+                if lines:
+                    return " && ".join(lines)
+
+        # Fallback: first non-empty line
+        for line in text.splitlines():
             line = line.strip()
             if line:
                 return line

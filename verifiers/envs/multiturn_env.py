@@ -61,7 +61,10 @@ class MultiTurnEnv(Environment):
             "responses": [],
             "turn": 0,
         }
+        # Allow environments to augment the initial prompt during setup_state
         state = self.setup_state(state)
+        # Re-read possibly updated prompt from state
+        prompt = state.get("prompt", prompt)
         if self.message_type == "chat":
             assert isinstance(prompt, list)
             completion = []

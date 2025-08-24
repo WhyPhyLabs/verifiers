@@ -22,8 +22,17 @@ An adapter for Terminal-Bench tasks is available via `verifiers.envs.TerminalBen
 
 - Example environment: `environments/vf_terminal_bench`
 - Stub quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"stub","expected_command":"echo hello"}' -n 1 -r 1`
-- Harness quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"word2vec-from-scratch","dataset_path":"/path/to/terminal-bench/tasks"}' -n 1 -r 1`
-- See `docs/terminalbench_integration.md` for details.
+- Harness quickstart: `uv run vf-eval vf-terminal-bench -a '{"task_id":"word2vec-from-scratch","dataset_path":"/path/to/terminal-bench/tasks"}' -n 1 -r 1` (requires an out-of-tree harness runner implementation; otherwise falls back to stub)
+  - See `docs/terminalbench_integration.md` for details.
+
+### New: Multi‑SWE‑Bench Adapter
+
+An adapter for Multi‑SWE‑Bench program‑repair tasks is available via `verifiers.envs.MultiSWEEnv`
+and `verifiers.integrations.multiswebench`.
+
+  - Example environment: `environments/vf_multi_swe_bench`
+  - Quickstart (stub): `uv run vf-eval vf-multi-swe-bench -a '{"instance_id":"stub-task","expected_token":"FIX_PATCH"}' -n 1 -r 1`
+  - See `docs/multiswebench_integration.md` for details.
 ## Setup
 
 We recommend using `verifiers` with along [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management in your own project:
@@ -291,4 +300,3 @@ If you use this code in your research, please cite:
 - Default patterns for hosted resources such as code sandboxes, auxiliary models, and MCP servers
 - Multimodal input support
 - Non-increasing token sequences via REINFORCE
-
