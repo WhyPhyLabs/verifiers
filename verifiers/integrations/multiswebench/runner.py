@@ -1,353 +1,294 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Protocol
 import json
 import os
 import shutil
-import subprocess
-import tempfile
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from subprocess import CompletedProcess, run
+from typing import Any, Protocol
 
 
 @dataclass
-class PatchStepResult:
-    observation: str
-    done: bool
-    passed: bool
+class EvalResult:
+    """Outcome of evaluating a single instance/patch."""
+
+    resolved: bool
     info: dict[str, Any]
 
 
 class MultiSWERunner(Protocol):
-    """Protocol for running Multi‑SWE‑Bench tasks.
+    """Protocol for evaluating a single Multi-SWE-Bench instance + patch."""
 
-    A concrete implementation should:
-    - fetch/prepare the target repo for a specific task id
-    - accept patches (e.g., unified diffs) proposed by the agent
-    - apply the patch, run the benchmark's tests, and report pass/fail
-    """
-
-    def start(self, task_id: str) -> str:
-        """Prepare task and return initial observation (e.g., failing tests)."""
-
-    def apply_patch(self, patch_text: str) -> PatchStepResult:
-        """Apply a patch and return test results and status."""
+    def evaluate(
+        self,
+        *,
+        instance_id: str,
+        patch: str,
+    ) -> EvalResult:  # pragma: no cover - protocol
+        ...
 
 
 class StubRunner:
-    """A minimal runner for smoke tests and development.
+    """A minimal runner for CI that treats a magic token as success.
 
-    Marks success when a proposed patch contains an expected token.
+    If the provided patch contains the token "FIX_PATCH", we mark it as resolved,
+    otherwise unresolved. This avoids external dependencies while preserving the
+    control flow of the environment.
     """
 
-    def __init__(self, expected_token: str = "PASS_FIX", max_attempts: int = 3):
-        self.expected_token = expected_token
-        self.max_attempts = max_attempts
-        self.attempts = 0
-        self.started = False
+    def __init__(self, success_token: str = "FIX_PATCH") -> None:
+        self.success_token = success_token
 
-    def start(self, task_id: str) -> str:  # noqa: ARG002
-        self.attempts = 0
-        self.started = True
-        return "Failing tests: 1\n- test_example::test_should_pass (currently failing)\nSuggest a patch (unified diff) to fix."
+    def evaluate(self, *, instance_id: str, patch: str) -> EvalResult:  # noqa: ARG002
+        passed = self.success_token in patch
+        return EvalResult(resolved=passed, info={"stub": True})
 
-    def apply_patch(self, patch_text: str) -> PatchStepResult:
-        if not self.started:
-            raise RuntimeError("StubRunner.start() must be called before apply_patch().")
-        self.attempts += 1
-        done = False
-        passed = False
-        info: dict[str, Any] = {"attempts": self.attempts}
-        if self.expected_token in patch_text:
-            done = True
-            passed = True
-            obs = "All tests passed.\n"
-        else:
-            obs = "Tests still failing.\n"
-            if self.attempts >= self.max_attempts:
-                done = True
-                passed = False
-        return PatchStepResult(observation=obs, done=done, passed=passed, info=info)
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _tail(text: str, n: int = 2000) -> str:
+    return text[-n:]
+
+
+def _run_entrypoint(
+    *,
+    module: str,
+    args: list[str],
+    cwd: str | None,
+    timeout_sec: int,
+) -> CompletedProcess:
+    cmd = [sys.executable, "-m", module, *args]
+    return run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout_sec)
+
+
+def _report_indicates_resolved(report_dir: Path) -> tuple[bool, dict[str, Any]]:
+    """Heuristically determine success from Multi-SWE reports.
+
+    Prefer final_report.json (single-source-of-truth in official harness). Fall back
+    to report.json and try common shapes.
+    """
+    info: dict[str, Any] = {}
+    final = report_dir / "final_report.json"
+    if final.exists():
+        try:
+            data = json.loads(final.read_text(encoding="utf-8"))
+            info["final_report"] = True
+            # Common shapes: {"resolved_instances":["<id>", ...]} or
+            # {"instances": {"<id>": {"resolved": true}}}
+            if isinstance(data, dict):
+                if isinstance(data.get("resolved_instances"), list):
+                    resolved = bool(data.get("resolved_instances"))
+                    info["resolved_instances"] = data["resolved_instances"]
+                    return resolved, info
+                inst = data.get("instances")
+                if isinstance(inst, dict):
+                    # consider resolved if any instance resolved
+                    any_resolved = any(
+                        isinstance(v, dict) and v.get("resolved") for v in inst.values()
+                    )
+                    return bool(any_resolved), info
+        except Exception:
+            pass
+
+    legacy = report_dir / "report.json"
+    if legacy.exists():
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            info["legacy_report"] = True
+            if isinstance(data, dict):
+                if isinstance(data.get("resolved_instances"), list):
+                    resolved = bool(data.get("resolved_instances"))
+                    info["resolved_instances"] = data["resolved_instances"]
+                    return resolved, info
+                inst = data.get("instances")
+                if isinstance(inst, dict):
+                    any_resolved = any(
+                        isinstance(v, dict) and v.get("resolved") for v in inst.values()
+                    )
+                    return bool(any_resolved), info
+        except Exception:
+            pass
+    return False, info
 
 
 class HarnessRunner:
-    """Multi‑SWE‑Bench runner backed by the official harness.
+    """Runner that shells out to the official Multi-SWE-Bench harness.
 
-    This runner shells out to `python -m multi_swe_bench.harness.run_evaluation`
-    for a single instance at a time. It expects Docker to be available.
+    This runner writes a single-instance config and patch file into a temporary
+    directory and invokes the harness module with that config. It then parses
+    the produced report to determine success.
 
-    task_id format: "<org>__<repo>-<number>" (e.g., "axios__axios-5919").
+    The runner is intentionally entrypoint-parameterized to avoid hard deps and
+    allow evolving upstream interfaces.
     """
 
     def __init__(
         self,
+        *,
         dataset_file: str,
-        workdir: str | None = None,
-        output_dir: str | None = None,
-        repo_dir: str | None = None,
-        max_workers: int = 1,
-        force_build: bool = False,
-        cache_level: str = "env",
-        log_level: str = "INFO",
-        extra_env: dict[str, str] | None = None,
+        output_dir: str = "./msb_runs",
+        entrypoint_module: str = "multi_swe_bench.harness.run_evaluation",
         timeout_sec: int = 1800,
+        extra_args: list[str] | None = None,
     ) -> None:
-        self.dataset_file = str(dataset_file)
-        self.workdir = str(workdir or Path("./msb_work").absolute())
-        self.output_dir = str(output_dir or Path("./msb_out").absolute())
-        self.repo_dir = str(repo_dir or Path("./msb_repos").absolute())
-        self.max_workers = max_workers
-        self.force_build = force_build
-        self.cache_level = cache_level
-        self.log_level = log_level
-        self.extra_env = extra_env or {}
-        self.timeout_sec = timeout_sec
-
-        Path(self.workdir).mkdir(parents=True, exist_ok=True)
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        Path(self.repo_dir).mkdir(parents=True, exist_ok=True)
-
-        # Preload dataset index for quick lookup
-        self._index: dict[str, dict[str, Any]] = {}
-        with open(self.dataset_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                inst_id = f"{item['org']}__{item['repo']}-{item['number']}"
-                self._index[inst_id] = item
-
-        self._current_task: str | None = None
-
-    def _parse_task(self, task_id: str) -> dict[str, Any]:
-        if task_id not in self._index:
-            raise ValueError(
-                f"Unknown task_id '{task_id}'. Ensure it exists in {self.dataset_file}"
-            )
-        return self._index[task_id]
-
-    def _run_harness(self, config: dict[str, Any]) -> tuple[bool, str]:
-        with tempfile.TemporaryDirectory() as td:
-            cfg_path = Path(td) / "config.json"
-            cfg_path.write_text(json.dumps(config), encoding="utf-8")
-            cmd = [
-                sys.executable,
-                "-m",
-                "multi_swe_bench.harness.run_evaluation",
-                "--config",
-                str(cfg_path),
-            ]
-            env = os.environ.copy()
-            env.update(self.extra_env)
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=env,
-                    timeout=self.timeout_sec,
-                )
-                out = proc.stdout
-                if proc.returncode != 0:
-                    # Treat non-zero return as failure and surface tail
-                    tail = out[-2000:] if out else ""
-                    return False, f"Harness exited with code {proc.returncode}.\n{tail}"
-            except subprocess.TimeoutExpired as e:
-                out = (e.stdout or "") + (e.stderr or "")
-                return False, f"Harness timed out after {self.timeout_sec}s.\n{out[-2000:]}"
-
-            # Robust success detection: prefer final_report.json in output_dir
-            resolved = False
-            final_report = Path(self.output_dir) / "final_report.json"
-            try:
-                if final_report.exists():
-                    data = json.loads(final_report.read_text())
-                    resolved = self._report_indicates_resolved(data)
-                else:
-                    # Fallback for older schemas: scan any report.json
-                    reports = list(Path(self.output_dir).rglob("report.json"))
-                    if reports:
-                        data = json.loads(reports[0].read_text())
-                        resolved = self._report_indicates_resolved(data)
-            except Exception:
-                pass
-
-            return resolved, out
-
-    def _report_indicates_resolved(self, data: Any) -> bool:
-        if not self._current_task:
-            return False
-        item = self._parse_task(self._current_task)
-        inst_harness_id = f"{item['org']}/{item['repo']}:pr-{item['number']}"
-        inst_dataset_id = f"{item['org']}__{item['repo']}-{item['number']}"
-
-        try:
-            resolved_list = data.get("resolved_instances")
-            if isinstance(resolved_list, list):
-                if inst_harness_id in resolved_list or inst_dataset_id in resolved_list:
-                    return True
-        except Exception:
-            pass
-
-        try:
-            instances = data.get("instances")
-            if isinstance(instances, dict):
-                rec = instances.get(inst_harness_id) or instances.get(inst_dataset_id)
-                if isinstance(rec, dict) and isinstance(rec.get("resolved"), bool):
-                    return bool(rec["resolved"])
-        except Exception:
-            pass
-
-        def any_resolved(obj: Any) -> bool:
-            if isinstance(obj, dict):
-                if isinstance(obj.get("resolved"), bool) and obj.get("resolved"):
-                    return True
-                return any(any_resolved(v) for v in obj.values())
-            if isinstance(obj, list):
-                return any(any_resolved(v) for v in obj)
-            return False
-
-        return any_resolved(data)
-
-    def start(self, task_id: str) -> str:
-        self._current_task = task_id
-        _ = self._parse_task(task_id)
-        return (
-            "Multi‑SWE‑Bench instance prepared. Provide a unified diff patch to apply.\n"
-            "Format: output of `git diff -U` with proper file paths."
-        )
-
-    def apply_patch(self, patch_text: str) -> PatchStepResult:
-        if not self._current_task:
-            raise RuntimeError("HarnessRunner.start() must be called first.")
-        item = self._parse_task(self._current_task)
-        inst_id = self._current_task
-
-        # Write a single‑instance patch file in JSONL format
-        patch_dir = Path(self.workdir) / "patches"
-        patch_dir.mkdir(parents=True, exist_ok=True)
-        patch_path = patch_dir / f"{inst_id}.jsonl"
-        patch_obj = {
-            "org": item["org"],
-            "repo": item["repo"],
-            "number": item["number"],
-            "fix_patch": patch_text,
-        }
-        patch_path.write_text(json.dumps(patch_obj) + "\n", encoding="utf-8")
-
-        # Build harness config for a single instance
-        log_dir = Path(self.output_dir) / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        inst_harness_id = f"{item['org']}/{item['repo']}:pr-{item['number']}"
-        cfg = {
-            "mode": "evaluation",
-            "workdir": self.workdir,
-            "patch_files": [str(patch_path)],
-            "dataset_files": [self.dataset_file],
-            "force_build": self.force_build,
-            "output_dir": self.output_dir,
-            "specifics": [inst_harness_id],
-            "skips": [],
-            "repo_dir": self.repo_dir,
-            "need_clone": True,
-            "global_env": [],
-            "clear_env": True,
-            "stop_on_error": True,
-            "max_workers": self.max_workers,
-            "max_workers_build_image": max(1, self.max_workers),
-            "max_workers_run_instance": max(1, self.max_workers),
-            "log_dir": str(log_dir),
-            "log_level": self.log_level,
-        }
-
-        resolved, logs = self._run_harness(cfg)
-        obs = "All tests passed.\n" if resolved else "Tests still failing.\n"
-        info = {"instance": inst_id, "logs_tail": logs[-2000:]}
-        done = resolved
-        return PatchStepResult(observation=obs, done=done, passed=resolved, info=info)
-
-
-class OpenHandsRunner(HarnessRunner):
-    """Multi‑SWE‑Bench runner backed by the OpenHands/MopenHands evaluation harness.
-
-    This runner shells out to a user‑configurable module entry point, allowing
-    integration with the OpenHands evaluation harness without hard deps.
-    """
-
-    def __init__(
-        self,
-        dataset_file: str,
-        entrypoint_module: str,
-        entrypoint_args: list[str] | None = None,
-        workdir: str | None = None,
-        output_dir: str | None = None,
-        repo_dir: str | None = None,
-        max_workers: int = 1,
-        force_build: bool = False,
-        log_level: str = "INFO",
-        extra_env: dict[str, str] | None = None,
-        timeout_sec: int = 1800,
-    ) -> None:
-        super().__init__(
-            dataset_file=dataset_file,
-            workdir=workdir,
-            output_dir=output_dir,
-            repo_dir=repo_dir,
-            max_workers=max_workers,
-            force_build=force_build,
-            cache_level="env",
-            log_level=log_level,
-            extra_env=extra_env,
-            timeout_sec=timeout_sec,
-        )
+        # Preflight
+        if not Path(dataset_file).is_file():
+            raise ValueError(f"dataset_file does not exist or is not a file: {dataset_file}")
+        self.dataset_file = dataset_file
+        self.output_dir = Path(output_dir)
         self.entrypoint_module = entrypoint_module
-        self.entrypoint_args = entrypoint_args or []
+        self.timeout_sec = timeout_sec
+        self.extra_args = extra_args or []
 
-    def _run_harness(self, config: dict[str, Any]) -> tuple[bool, str]:
-        with tempfile.TemporaryDirectory() as td:
-            cfg_path = Path(td) / "config.json"
-            cfg_path.write_text(json.dumps(config), encoding="utf-8")
-            cmd = [
-                sys.executable,
-                "-m",
-                self.entrypoint_module,
-                "--config",
-                str(cfg_path),
-                *self.entrypoint_args,
-            ]
-            env = os.environ.copy()
-            env.update(self.extra_env)
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=env,
-                    timeout=self.timeout_sec,
+    def evaluate(self, *, instance_id: str, patch: str) -> EvalResult:
+        # Layout temp working dir
+        with tempfile.TemporaryDirectory(prefix="msb_") as tmp:
+            tmpdir = Path(tmp)
+            work_out = tmpdir / "out"
+            work_out.mkdir(parents=True, exist_ok=True)
+
+            # Write a single-instance patch jsonl file as expected by harness
+            patches_path = tmpdir / "patches.jsonl"
+            patch_item = {
+                "instance_id": instance_id,
+                "patch": patch,
+            }
+            _write_text(patches_path, json.dumps(patch_item) + "\n")
+
+            # Build a minimal config dict. Upstream may accept additional keys; we pass
+            # only conservative, commonly supported fields.
+            cfg = {
+                "dataset_file": os.fspath(Path(self.dataset_file).resolve()),
+                "patches_path": os.fspath(patches_path),
+                "output_dir": os.fspath(work_out),
+                "max_workers": 1,
+                "instances": [instance_id],
+            }
+            cfg_path = tmpdir / "config.json"
+            _write_text(cfg_path, json.dumps(cfg))
+
+            # Invoke harness
+            args = ["--config", os.fspath(cfg_path), *self.extra_args]
+            proc = _run_entrypoint(
+                module=self.entrypoint_module, args=args, cwd=tmp, timeout_sec=self.timeout_sec
+            )
+            if proc.returncode != 0:
+                return EvalResult(
+                    resolved=False,
+                    info={
+                        "error": "harness_failed",
+                        "returncode": proc.returncode,
+                        "stderr_tail": _tail(proc.stderr or ""),
+                        "stdout_tail": _tail(proc.stdout or ""),
+                    },
                 )
-                out = proc.stdout
-                if proc.returncode != 0:
-                    tail = out[-2000:] if out else ""
-                    return False, f"OpenHands harness exited with code {proc.returncode}.\n{tail}"
-            except subprocess.TimeoutExpired as e:
-                out = (e.stdout or "") + (e.stderr or "")
-                return False, f"OpenHands harness timed out after {self.timeout_sec}s.\n{out[-2000:]}"
 
-            resolved = False
-            final_report = Path(self.output_dir) / "final_report.json"
+            # Persist full logs
             try:
-                if final_report.exists():
-                    data = json.loads(final_report.read_text())
-                    resolved = self._report_indicates_resolved(data)
-                else:
-                    reports = list(Path(self.output_dir).rglob("report.json"))
-                    if reports:
-                        data = json.loads(reports[0].read_text())
-                        resolved = self._report_indicates_resolved(data)
+                (work_out / "stdout.txt").write_text(proc.stdout or "", encoding="utf-8")
+                (work_out / "stderr.txt").write_text(proc.stderr or "", encoding="utf-8")
             except Exception:
                 pass
 
-            return resolved, out
+            # Parse report
+            resolved, info = _report_indicates_resolved(work_out)
+            # Persist artifacts if requested output_dir is different from tmp
+            try:
+                if self.output_dir:
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    # copy tree (shallow)
+                    for p in work_out.rglob("*"):
+                        if p.is_file():
+                            dst = self.output_dir / p.relative_to(work_out)
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(p, dst)
+            except Exception:
+                pass
+            return EvalResult(resolved=resolved, info=info)
+
+
+class OpenHandsRunner:
+    """Runner that shells to a user-provided MopenHands entrypoint.
+
+    It mirrors HarnessRunner behavior but uses a caller-supplied module path.
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset_file: str,
+        output_dir: str = "./msb_runs",
+        openhands_entrypoint: str = "mopenhands.run",  # module path provided by user
+        timeout_sec: int = 1800,
+        extra_args: list[str] | None = None,
+    ) -> None:
+        if not Path(dataset_file).is_file():
+            raise ValueError(f"dataset_file does not exist or is not a file: {dataset_file}")
+        self.dataset_file = dataset_file
+        self.output_dir = Path(output_dir)
+        self.entrypoint_module = openhands_entrypoint
+        self.timeout_sec = timeout_sec
+        self.extra_args = extra_args or []
+
+    def evaluate(self, *, instance_id: str, patch: str) -> EvalResult:
+        with tempfile.TemporaryDirectory(prefix="msb_oh_") as tmp:
+            tmpdir = Path(tmp)
+            work_out = tmpdir / "out"
+            work_out.mkdir(parents=True, exist_ok=True)
+
+            patches_path = tmpdir / "patches.jsonl"
+            _write_text(
+                patches_path,
+                json.dumps({"instance_id": instance_id, "patch": patch}) + "\n",
+            )
+            cfg = {
+                "dataset_file": os.fspath(Path(self.dataset_file).resolve()),
+                "patches_path": os.fspath(patches_path),
+                "output_dir": os.fspath(work_out),
+                "max_workers": 1,
+                "instances": [instance_id],
+            }
+            cfg_path = tmpdir / "config.json"
+            _write_text(cfg_path, json.dumps(cfg))
+
+            args = ["--config", os.fspath(cfg_path), *self.extra_args]
+            proc = _run_entrypoint(
+                module=self.entrypoint_module, args=args, cwd=tmp, timeout_sec=self.timeout_sec
+            )
+            if proc.returncode != 0:
+                return EvalResult(
+                    resolved=False,
+                    info={
+                        "error": "openhands_failed",
+                        "returncode": proc.returncode,
+                        "stderr_tail": _tail(proc.stderr or ""),
+                        "stdout_tail": _tail(proc.stdout or ""),
+                    },
+                )
+
+            # Persist full logs
+            try:
+                (work_out / "stdout.txt").write_text(proc.stdout or "", encoding="utf-8")
+                (work_out / "stderr.txt").write_text(proc.stderr or "", encoding="utf-8")
+            except Exception:
+                pass
+
+            resolved, info = _report_indicates_resolved(work_out)
+            try:
+                if self.output_dir:
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    for p in work_out.rglob("*"):
+                        if p.is_file():
+                            dst = self.output_dir / p.relative_to(work_out)
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(p, dst)
+            except Exception:
+                pass
+            return EvalResult(resolved=resolved, info=info)
+

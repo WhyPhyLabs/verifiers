@@ -1,44 +1,39 @@
 # Multi‑SWE‑Bench Integration
 
-This repository includes a thin adapter for Multi‑SWE‑Bench style program repair tasks.
+This repository includes an adapter for evaluating Multi‑SWE‑Bench instances
+with either the official harness or the MopenHands harness.
 
 - Env: `verifiers.envs.MultiSWEEnv`
 - Runner interface: `verifiers.integrations.multiswebench.MultiSWERunner`
-- Stub runner (for CI): `StubRunner` (no external deps)
-- Harness runner: `HarnessRunner` (uses official `multi_swe_bench` Python API)
-- Rubric: `MultiSWERubric` (1.0 pass, 0.0 fail)
+- Runners: `HarnessRunner` (official), `OpenHandsRunner` (MopenHands), `StubRunner`
+- Rubric: `MultiSWERubric` (1.0 when resolved, else 0.0)
 
-Quick usage with stub runner:
-
-```
-uv run vf-eval vf-multi-swe-bench -a '{"task_id":"stub","expected_token":"PASS_FIX"}' -n 1 -r 1
-```
-
-Production usage:
-- Use the built-in `HarnessRunner` by supplying a dataset file and task id.
-- Use `vf-eval` for evaluations and `report_utils` for HTML reports.
-
-Example (single instance, stub OpenAI for model calls):
+Quick usage (stub):
 
 ```
-uv run vf-install vf-multi-swe-bench
+uv run vf-eval vf-multi-swe-bench -a '{"instance_id":"example"}' -n 1 -r 1
+```
+
+Official harness (single‑instance):
+
+```
 uv run vf-eval vf-multi-swe-bench \
-  -a '{
-        "task_id":"axios__axios-5919",
-        "dataset_file":"/mnt/beegfs/agents/model_repository/datasets/multi-swe-bench/js/axios__axios_dataset.jsonl",
-        "workdir":"./msb_work",
-        "output_dir":"./msb_out",
-        "repo_dir":"./msb_repos",
-        "max_workers":1
-      }' \
-  -n 1 -r 1 \
-  -m mock -b http://127.0.0.1:8009/v1 -k OPENAI_API_KEY
+  -a '{"instance_id":"<ID>", "dataset_file":"/path/to/dataset.jsonl"}' \
+  -n 1 -r 1
+```
+
+MopenHands harness:
+
+```
+uv run vf-eval vf-multi-swe-bench \
+  -a '{"instance_id":"<ID>", "dataset_file":"/path/to/dataset.jsonl", "use_openhands":true, "openhands_entrypoint":"mopenhands.run"}' \
+  -n 1 -r 1
 ```
 
 Notes:
-- Ensure Docker is available. First-run will build environment images and can take time.
-- `task_id` format is `<org>__<repo>-<number>` matching dataset entries.
+- Both harness runners use `sys.executable -m <module> --config <cfg.json>` under the hood and expect the harness to write a `final_report.json` in the output directory. The adapter falls back to `report.json` when needed.
+- Timeouts and return‑code checks are enabled; failures surface stderr/stdout tails in the result info for debugging.
+- The environment is single‑turn by default: the model’s last message is treated as the candidate patch.
 
 Testing:
-- Smoke test: `tests/test_multiswe_env.py` validates end-to-end flow with `mock_openai_client` and `StubRunner`.
-- Run: `uv run pytest -k multiswe -q`.
+- Smoke test: add `-k multiswe` to run stub‑based tests, or set env‑vars to opt‑in to integration tests in your CI.

@@ -3,35 +3,33 @@ from verifiers.integrations.multiswebench import StubRunner
 from datasets import Dataset
 
 
-def test_multiswe_env_smoke_chat(mock_openai_client):
-    # Async client proposes a patch containing the expected token
+def test_multiswe_env_stub_smoke(mock_openai_client):
+    # The agent is prompted to output a patch containing FIX_PATCH to pass
+    user_prompt = "Return a patch that contains the token FIX_PATCH"
     mock_openai_client.add_chat_response(
-        messages=[{"role": "user", "content": "Propose a patch to fix tests."}],
-        response="""--- a/module.py
-+++ b/module.py
+        messages=[{"role": "user", "content": user_prompt}],
+        response="""
+--- a/foo.py
++++ b/foo.py
 @@
-- return 0
-+ return 1  # PASS_FIX
-""",
+# FIX_PATCH
+""".strip(),
     )
     rubric = vf.MultiSWERubric()
-    dataset_dict = {
-        "prompt": [[{"role": "user", "content": "Propose a patch to fix tests."}]],
-        "answer": ["OK"],
-        "info": [{}],
-        "task": ["multiswe-stub"],
-    }
-    ds = Dataset.from_dict(dataset_dict)
-    env = vf.MultiSWEEnv(
-        runner=StubRunner(expected_token="PASS_FIX"),
-        task_id="stub-task",
-        eval_dataset=ds,
+    ds = Dataset.from_dict(
+        {
+            "prompt": [[{"role": "user", "content": user_prompt}]],
+            "answer": ["resolved"],
+            "info": [{}],
+            "task": ["example-instance"],
+        }
     )
+    env = vf.MultiSWEEnv(runner=StubRunner(), instance_id="example-instance", eval_dataset=ds)
     env.rubric = rubric
     results = env.evaluate(
         client=mock_openai_client,
         model="dummy-chat",
-        sampling_args={"max_tokens": 128, "temperature": 0.0},
+        sampling_args={"max_tokens": 64, "temperature": 0.0},
         num_examples=1,
         rollouts_per_example=1,
         max_concurrent=1,

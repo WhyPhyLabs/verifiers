@@ -1,18 +1,23 @@
 """Multi-SWE-Bench integration shims.
 
-Defines a lightweight runner protocol to integrate Multi-SWE-Bench style
-program-repair tasks with the verifiers Environment API without hard deps.
+This package provides thin, optional integrations to run Multi-SWE-Bench
+evaluations from the verifiers environments without imposing hard deps.
 
-Production deployments should provide a concrete runner that talks to the
-official Multi-SWE-Bench harness to checkout repos, apply patches, run tests,
-and decide pass/fail. This package also includes a `StubRunner` suitable for
-CI smoke tests.
+It exposes:
+- Runner protocol `MultiSWERunner`
+- `StubRunner` for CI smoke
+- `HarnessRunner` that shells to the official harness
+- `OpenHandsRunner` that shells to a provided entrypoint for the MopenHands harness
+
+Both concrete runners are intentionally entrypoint-parameterized and guarded so
+users can opt-in when the respective packages are installed.
 """
 
-from .runner import (
+from .runner import (  # noqa: F401
     MultiSWERunner,
-    PatchStepResult,
     StubRunner,
     HarnessRunner,
     OpenHandsRunner,
-)  # noqa: F401
+    EvalResult,
+)
+
