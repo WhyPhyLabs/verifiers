@@ -224,7 +224,10 @@ class OpenHandsRunner:
         *,
         dataset_file: str,
         output_dir: str = "./msb_runs",
-        openhands_entrypoint: str = "mopenhands.run",  # module path provided by user
+        # Preferred name matching docs/loader
+        openhands_entrypoint: str | None = None,
+        # Back-compat alias matching earlier call-sites
+        entrypoint_module: str | None = None,
         timeout_sec: int = 1800,
         extra_args: list[str] | None = None,
     ) -> None:
@@ -232,7 +235,9 @@ class OpenHandsRunner:
             raise ValueError(f"dataset_file does not exist or is not a file: {dataset_file}")
         self.dataset_file = dataset_file
         self.output_dir = Path(output_dir)
-        self.entrypoint_module = openhands_entrypoint
+        self.entrypoint_module = (
+            openhands_entrypoint or entrypoint_module or "mopenhands.run"
+        )
         self.timeout_sec = timeout_sec
         self.extra_args = extra_args or []
 
@@ -291,4 +296,3 @@ class OpenHandsRunner:
             except Exception:
                 pass
             return EvalResult(resolved=resolved, info=info)
-
