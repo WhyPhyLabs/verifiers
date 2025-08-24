@@ -47,6 +47,11 @@ class MultiSWEEnv(MultiTurnEnv):
         return st
 
     def _extract_patch(self, messages: Messages) -> str:
+        """Return a unified-diff patch string from the assistant's latest message.
+
+        This is a light heuristic that treats the last assistant message content
+        as the candidate patch. Behavior unchanged; documents the expectation.
+        """
         if isinstance(messages, list) and messages:
             last = messages[-1]
             content = last.get("content", "") if isinstance(last, dict) else str(last)

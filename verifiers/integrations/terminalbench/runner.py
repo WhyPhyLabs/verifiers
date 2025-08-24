@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
+import logging
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ import subprocess
 import tempfile
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -131,6 +134,13 @@ class HarnessRunner:
             env = os.environ.copy()
             env.update(self.extra_env)
             try:
+                logger.debug(
+                    "TB HarnessRunner: launching module=%s task_id=%s output_path=%s agent=%s",
+                    self.entrypoint_module,
+                    self._current_task,
+                    self.output_path,
+                    self.agent_name,
+                )
                 proc = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,

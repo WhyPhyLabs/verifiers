@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import shutil
@@ -175,6 +177,12 @@ class HarnessRunner:
 
             # Invoke harness
             args = ["--config", os.fspath(cfg_path), *self.extra_args]
+            logger.debug(
+                "MSB HarnessRunner: launching official harness module=%s workdir=%s output_dir=%s",
+                self.entrypoint_module,
+                tmp,
+                work_out,
+            )
             proc = _run_entrypoint(
                 module=self.entrypoint_module, args=args, cwd=tmp, timeout_sec=self.timeout_sec
             )
@@ -263,6 +271,12 @@ class OpenHandsRunner:
             _write_text(cfg_path, json.dumps(cfg))
 
             args = ["--config", os.fspath(cfg_path), *self.extra_args]
+            logger.debug(
+                "MSB OpenHandsRunner: launching entrypoint module=%s workdir=%s output_dir=%s",
+                self.entrypoint_module,
+                tmp,
+                work_out,
+            )
             proc = _run_entrypoint(
                 module=self.entrypoint_module, args=args, cwd=tmp, timeout_sec=self.timeout_sec
             )
@@ -284,6 +298,7 @@ class OpenHandsRunner:
             except Exception:
                 pass
 
+logger = logging.getLogger(__name__)
             resolved, info = _report_indicates_resolved(work_out)
             try:
                 if self.output_dir:
