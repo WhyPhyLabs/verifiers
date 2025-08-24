@@ -1,5 +1,4 @@
 import verifiers as vf
-from verifiers.integrations.multiswebench import StubRunner
 
 try:
     from verifiers.integrations.multiswebench import HarnessRunner, OpenHandsRunner
@@ -9,68 +8,57 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 def load_environment(
-    task_id: str = "stub",
-    expected_token: str = "PASS_FIX",
+    instance_id: str | None = "example-instance",
+    *,
+    task_id: str | None = None,
     dataset_file: str | None = None,
-    workdir: str | None = None,
     output_dir: str | None = None,
-    repo_dir: str | None = None,
-    max_workers: int = 1,
-    force_build: bool = False,
     use_openhands: bool | None = None,
     openhands_entrypoint: str | None = None,
-    openhands_args: list[str] | None = None,
     eval_dataset=None,
     **kwargs,
 ) -> vf.Environment:
-    """Load a Multi‑SWE‑Bench environment.
+    """Load a Multi-SWE-Bench single-instance environment.
 
-    Selection logic (in order):
-    - If use_openhands and OpenHandsRunner is available: use OpenHands runner (requires entrypoint)
-    - Else if dataset_file and HarnessRunner is available: use official harness runner
-    - Else: use StubRunner
+    Args:
+        instance_id: Identifier of the dataset instance to evaluate.
+        task_id: Back-compat alias for instance_id.
+        dataset_file: Path to the Multi-SWE-Bench dataset JSONL file.
+        output_dir: Directory to store harness artifacts (default ./msb_runs).
+        use_openhands: When True, use the MopenHands harness via `openhands_entrypoint`.
+        openhands_entrypoint: Module path to the MopenHands entrypoint (e.g.,
+            "mopenhands.run"). If None, a sensible default is used by the runner.
+        eval_dataset: Optional HF Dataset to drive prompts/answers.
     """
-    if use_openhands and OpenHandsRunner:
-        if not dataset_file or not openhands_entrypoint:
-            raise ValueError("OpenHandsRunner requires dataset_file and openhands_entrypoint")
-        runner = OpenHandsRunner(
-            dataset_file=dataset_file,
-            entrypoint_module=openhands_entrypoint,
-            entrypoint_args=openhands_args or [],
-            workdir=workdir,
-            output_dir=output_dir,
-            repo_dir=repo_dir,
-            max_workers=max_workers,
-            force_build=force_build,
-        )
+    runner = None
+    out = output_dir or "./msb_runs"
+    inst_id = instance_id or task_id or "example-instance"
+
+    if use_openhands and OpenHandsRunner and dataset_file:
+        runner = OpenHandsRunner(dataset_file=dataset_file, output_dir=out, openhands_entrypoint=openhands_entrypoint or "mopenhands.run")
     elif dataset_file and HarnessRunner:
-        runner = HarnessRunner(
-            dataset_file=dataset_file,
-            workdir=workdir,
-            output_dir=output_dir,
-            repo_dir=repo_dir,
-            max_workers=max_workers,
-            force_build=force_build,
-        )
+        runner = HarnessRunner(dataset_file=dataset_file, output_dir=out)
     else:
-        runner = StubRunner(expected_token=expected_token)
+        from verifiers.integrations.multiswebench import StubRunner
+
+        runner = StubRunner()
 
     if eval_dataset is None:
         from datasets import Dataset
 
         instruction = (
-            "Propose a unified diff patch to fix the failing tests. "
-            "Respond with only the patch."
+            "Produce a unified diff patch that resolves the failing tests for the given instance. "
+            "Include only the patch text."
         )
         eval_dataset = Dataset.from_dict(
             {
                 "prompt": [[{"role": "user", "content": instruction}]],
-                "answer": ["OK"],
+                "answer": ["resolved"],
                 "info": [{}],
-                "task": [task_id],
+                "task": [inst_id],
             }
         )
 
-    env = vf.MultiSWEEnv(runner=runner, task_id=task_id, eval_dataset=eval_dataset)
+    env = vf.MultiSWEEnv(runner=runner, instance_id=inst_id, eval_dataset=eval_dataset)
     env.rubric = vf.MultiSWERubric()
     return env
