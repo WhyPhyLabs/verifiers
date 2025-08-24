@@ -157,19 +157,70 @@ class HarnessRunner:
                 env=env,
             )
             out = proc.stdout
-            # Scan output_dir for a report.json and check resolved flag
-            reports = list(Path(self.output_dir).rglob("report.json"))
+
+            # Robust success detection: prefer final_report.json in output_dir
             resolved = False
-            if reports:
-                try:
-                    data = json.loads(reports[0].read_text())
-                    for v in data.values():
-                        if isinstance(v, dict) and "resolved" in v:
-                            resolved = bool(v["resolved"])
-                            break
-                except Exception:
-                    pass
+            final_report = Path(self.output_dir) / "final_report.json"
+            try:
+                if final_report.exists():
+                    data = json.loads(final_report.read_text())
+                    resolved = self._report_indicates_resolved(data)
+                else:
+                    # Fallback for older schemas: scan any report.json
+                    reports = list(Path(self.output_dir).rglob("report.json"))
+                    if reports:
+                        data = json.loads(reports[0].read_text())
+                        resolved = self._report_indicates_resolved(data)
+            except Exception:
+                # Leave resolved = False on parse errors
+                pass
+
             return resolved, out
+
+    def _report_indicates_resolved(self, data: Any) -> bool:
+        """Infer resolution for the current task from known report shapes.
+
+        Tries multiple schema variants seen in Multi‑SWE‑Bench reports:
+        - { "resolved_instances": ["org/repo:pr-N", ...], ... }
+        - { "instances": { "org/repo:pr-N": { "resolved": true, ... }, ... } }
+        - Nested dicts containing a boolean "resolved" (last‑resort heuristic)
+        """
+        if not self._current_task:
+            return False
+        item = self._parse_task(self._current_task)
+        inst_harness_id = f"{item['org']}/{item['repo']}:pr-{item['number']}"
+        inst_dataset_id = f"{item['org']}__{item['repo']}-{item['number']}"
+
+        # 1) resolved_instances list
+        try:
+            resolved_list = data.get("resolved_instances")
+            if isinstance(resolved_list, list):
+                if inst_harness_id in resolved_list or inst_dataset_id in resolved_list:
+                    return True
+        except Exception:
+            pass
+
+        # 2) instances map with per‑instance dicts containing resolved
+        try:
+            instances = data.get("instances")
+            if isinstance(instances, dict):
+                rec = instances.get(inst_harness_id) or instances.get(inst_dataset_id)
+                if isinstance(rec, dict) and isinstance(rec.get("resolved"), bool):
+                    return bool(rec["resolved"])
+        except Exception:
+            pass
+
+        # 3) Last resort: any nested dict with resolved=True
+        def any_resolved(obj: Any) -> bool:
+            if isinstance(obj, dict):
+                if isinstance(obj.get("resolved"), bool) and obj.get("resolved"):
+                    return True
+                return any(any_resolved(v) for v in obj.values())
+            if isinstance(obj, list):
+                return any(any_resolved(v) for v in obj)
+            return False
+
+        return any_resolved(data)
 
     def start(self, task_id: str) -> str:
         self._current_task = task_id
