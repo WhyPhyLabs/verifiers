@@ -77,18 +77,6 @@ class HarnessRunner:
     for a single instance at a time. It expects Docker to be available.
 
     task_id format: "<org>__<repo>-<number>" (e.g., "axios__axios-5919").
-
-    Args:
-        dataset_file: Path to a dataset JSONL file (one of the downloaded
-            Multi‑SWE‑Bench dataset shards).
-        workdir: Working directory for the harness (build caches, etc.).
-        output_dir: Output directory for logs and reports.
-        repo_dir: Directory where target repositories can be cloned.
-        max_workers: Parallelism for the harness (kept low for single instance).
-        force_build: Whether to force rebuild images.
-        cache_level: Image cache level ("env" recommended).
-        log_level: Harness log level.
-        extra_env: Extra env vars to set for subprocess calls.
     """
 
     def __init__(
@@ -172,26 +160,17 @@ class HarnessRunner:
                         data = json.loads(reports[0].read_text())
                         resolved = self._report_indicates_resolved(data)
             except Exception:
-                # Leave resolved = False on parse errors
                 pass
 
             return resolved, out
 
     def _report_indicates_resolved(self, data: Any) -> bool:
-        """Infer resolution for the current task from known report shapes.
-
-        Tries multiple schema variants seen in Multi‑SWE‑Bench reports:
-        - { "resolved_instances": ["org/repo:pr-N", ...], ... }
-        - { "instances": { "org/repo:pr-N": { "resolved": true, ... }, ... } }
-        - Nested dicts containing a boolean "resolved" (last‑resort heuristic)
-        """
         if not self._current_task:
             return False
         item = self._parse_task(self._current_task)
         inst_harness_id = f"{item['org']}/{item['repo']}:pr-{item['number']}"
         inst_dataset_id = f"{item['org']}__{item['repo']}-{item['number']}"
 
-        # 1) resolved_instances list
         try:
             resolved_list = data.get("resolved_instances")
             if isinstance(resolved_list, list):
@@ -200,7 +179,6 @@ class HarnessRunner:
         except Exception:
             pass
 
-        # 2) instances map with per‑instance dicts containing resolved
         try:
             instances = data.get("instances")
             if isinstance(instances, dict):
@@ -210,7 +188,6 @@ class HarnessRunner:
         except Exception:
             pass
 
-        # 3) Last resort: any nested dict with resolved=True
         def any_resolved(obj: Any) -> bool:
             if isinstance(obj, dict):
                 if isinstance(obj.get("resolved"), bool) and obj.get("resolved"):
@@ -278,3 +255,77 @@ class HarnessRunner:
         info = {"instance": inst_id, "logs_tail": logs[-2000:]}
         done = resolved
         return PatchStepResult(observation=obs, done=done, passed=resolved, info=info)
+
+
+class OpenHandsRunner(HarnessRunner):
+    """Multi‑SWE‑Bench runner backed by the OpenHands/MopenHands evaluation harness.
+
+    This runner shells out to a user‑configurable module entry point, allowing
+    integration with the OpenHands evaluation harness without hard deps.
+    """
+
+    def __init__(
+        self,
+        dataset_file: str,
+        entrypoint_module: str,
+        entrypoint_args: list[str] | None = None,
+        workdir: str | None = None,
+        output_dir: str | None = None,
+        repo_dir: str | None = None,
+        max_workers: int = 1,
+        force_build: bool = False,
+        log_level: str = "INFO",
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(
+            dataset_file=dataset_file,
+            workdir=workdir,
+            output_dir=output_dir,
+            repo_dir=repo_dir,
+            max_workers=max_workers,
+            force_build=force_build,
+            cache_level="env",
+            log_level=log_level,
+            extra_env=extra_env,
+        )
+        self.entrypoint_module = entrypoint_module
+        self.entrypoint_args = entrypoint_args or []
+
+    def _run_harness(self, config: dict[str, Any]) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "config.json"
+            cfg_path.write_text(json.dumps(config), encoding="utf-8")
+            cmd = [
+                shutil.which("python") or "python",
+                "-m",
+                self.entrypoint_module,
+                "--config",
+                str(cfg_path),
+                *self.entrypoint_args,
+            ]
+            env = os.environ.copy()
+            env.update(self.extra_env)
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+            out = proc.stdout
+
+            resolved = False
+            final_report = Path(self.output_dir) / "final_report.json"
+            try:
+                if final_report.exists():
+                    data = json.loads(final_report.read_text())
+                    resolved = self._report_indicates_resolved(data)
+                else:
+                    reports = list(Path(self.output_dir).rglob("report.json"))
+                    if reports:
+                        data = json.loads(reports[0].read_text())
+                        resolved = self._report_indicates_resolved(data)
+            except Exception:
+                pass
+
+            return resolved, out

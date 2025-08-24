@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 
 @dataclass
@@ -13,13 +19,7 @@ class StepResult:
 
 
 class TerminalBenchRunner(Protocol):
-    """Protocol for running Terminal-Bench tasks.
-
-    A concrete implementation should drive a Terminal-Bench task lifecycle,
-    returning observations after executing agent-proposed commands, and report
-    completion/pass status. Implementations may talk to the official harness
-    via MCP, direct Python API, or CLI/REST wrappers.
-    """
+    """Protocol for running Terminal-Bench tasks."""
 
     def start(self, task_id: str) -> str:
         """Start a task and return the initial observation (e.g., shell prompt)."""
@@ -29,11 +29,7 @@ class TerminalBenchRunner(Protocol):
 
 
 class StubRunner:
-    """A minimal local runner for smoke tests and development.
-
-    Simulates a simple Terminal-Bench-like task that expects a specific command
-    sequence. Useful for CI and development environments without the harness.
-    """
+    """A minimal local runner for smoke tests and development."""
 
     def __init__(self, expected_command: str = "echo hello", max_steps: int = 5):
         self.expected_command = expected_command
@@ -63,3 +59,112 @@ class StubRunner:
                 done = True
                 passed = False
         return StepResult(observation=obs, done=done, passed=passed, info=info)
+
+
+class HarnessRunner:
+    """Terminal‑Bench runner using the official harness with the Terminus‑1 agent.
+
+    This runner shells out to a user‑configurable module entry point for the
+    Terminal‑Bench harness and runs a single task with the Terminus‑1 agent.
+
+    Notes:
+    - The Terminal‑Bench harness typically controls the agent end‑to‑end. Since
+      TerminalBenchEnv follows a step(command) API, this runner executes the
+      full harness on the first step and then returns the final outcome for any
+      subsequent steps.
+    """
+
+    def __init__(
+        self,
+        dataset_path: str,
+        output_path: str | None = None,
+        entrypoint_module: str | None = None,
+        entrypoint_args: list[str] | None = None,
+        agent_name: str = "terminus_1",
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        self.dataset_path = str(dataset_path)
+        self.output_path = str(output_path or Path("./tb_runs").absolute())
+        self.entrypoint_module = entrypoint_module or "terminal_bench.run"
+        self.entrypoint_args = entrypoint_args or []
+        self.agent_name = agent_name
+        self.extra_env = extra_env or {}
+
+        Path(self.output_path).mkdir(parents=True, exist_ok=True)
+
+        self._current_task: str | None = None
+        self._done: bool = False
+        self._passed: bool = False
+        self._observation: str = ""
+
+    def start(self, task_id: str) -> str:
+        self._current_task = task_id
+        self._done = False
+        self._passed = False
+        self._observation = "Task prepared. Provide a shell command if desired; the harness will run Terminus‑1 for the task on first step."
+        return self._observation
+
+    def _run_harness(self) -> tuple[bool, str]:
+        if not self._current_task:
+            raise RuntimeError("HarnessRunner.start() must be called first.")
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "config.json"
+            cfg = {
+                "dataset_path": self.dataset_path,
+                "task_id": self._current_task,
+                "output_path": self.output_path,
+                "agent": self.agent_name,
+            }
+            cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+            cmd = [
+                shutil.which("python") or "python",
+                "-m",
+                self.entrypoint_module,
+                "--config",
+                str(cfg_path),
+                *self.entrypoint_args,
+            ]
+            env = os.environ.copy()
+            env.update(self.extra_env)
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+            out = proc.stdout
+            # Attempt robust success detection across plausible report names
+            resolved = False
+            for name in ("final_report.json", "report.json", "results.json"):
+                candidate = Path(self.output_path) / name
+                if candidate.exists():
+                    try:
+                        data = json.loads(candidate.read_text())
+                        if isinstance(data.get("success"), bool):
+                            resolved = bool(data["success"])
+                            break
+                        if isinstance(data.get("resolved"), bool):
+                            resolved = bool(data["resolved"])
+                            break
+                        rec = data.get("instances", {}).get(self._current_task)
+                        if isinstance(rec, dict) and isinstance(rec.get("resolved"), bool):
+                            resolved = bool(rec["resolved"])
+                            break
+                        if isinstance(data.get("resolved_instances"), list) and self._current_task in data.get("resolved_instances"):
+                            resolved = True
+                            break
+                    except Exception:
+                        pass
+            return resolved, out
+
+    def step(self, command: str) -> StepResult:  # noqa: ARG002
+        if self._done:
+            return StepResult(self._observation, True, self._passed, {"cached": True})
+
+        resolved, logs = self._run_harness()
+        self._done = True
+        self._passed = resolved
+        self._observation = ("All tests passed.\n" if resolved else "Tests failed.\n") + logs[-2000:]
+        return StepResult(self._observation, self._done, self._passed, {"task": self._current_task or "", "logs_tail": logs[-2000:]})

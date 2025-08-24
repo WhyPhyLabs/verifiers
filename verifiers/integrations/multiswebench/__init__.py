@@ -14,4 +14,5 @@ from .runner import (
     PatchStepResult,
     StubRunner,
     HarnessRunner,
+    OpenHandsRunner,
 )  # noqa: F401
