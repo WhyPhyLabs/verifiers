@@ -34,8 +34,21 @@ def load_environment(
     out = output_dir or "./msb_runs"
     inst_id = instance_id or task_id or "example-instance"
 
+    # Fail fast: if OpenHands path is requested, require dataset_file and entrypoint
+    if use_openhands:
+        if not dataset_file:
+            raise ValueError("use_openhands=True requires dataset_file to be provided")
+        if not openhands_entrypoint:
+            raise ValueError(
+                "use_openhands=True requires openhands_entrypoint (e.g., 'mopenhands.run')"
+            )
+
     if use_openhands and OpenHandsRunner and dataset_file:
-        runner = OpenHandsRunner(dataset_file=dataset_file, output_dir=out, openhands_entrypoint=openhands_entrypoint or "mopenhands.run")
+        runner = OpenHandsRunner(
+            dataset_file=dataset_file,
+            output_dir=out,
+            openhands_entrypoint=openhands_entrypoint,
+        )
     elif dataset_file and HarnessRunner:
         runner = HarnessRunner(dataset_file=dataset_file, output_dir=out)
     else:

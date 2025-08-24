@@ -28,6 +28,10 @@ def load_environment(
         use_harness: Force using the harness when True, otherwise auto-detect based
             on dataset_path availability.
     """
+    # Fail fast: if harness is explicitly requested, require dataset_path
+    if use_harness and not dataset_path:
+        raise ValueError("use_harness=True requires dataset_path to be provided")
+
     if (use_harness or (use_harness is None and dataset_path)) and HarnessRunner:
         runner = HarnessRunner(  # type: ignore[call-arg]
             dataset_path=dataset_path,  # type: ignore[arg-type]
