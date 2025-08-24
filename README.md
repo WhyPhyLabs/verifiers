@@ -201,9 +201,6 @@ class YourMultiTurnEnv(vf.MultiTurnEnv):
     # return new environment message(s) + updated state
 ```
 
-<<<<<<< HEAD
-If your application requires more fine-grained control than is allowed by `MultiTurnEnv`, you may want to inherit from the base `Environment` functionality directly and override the `rollo
-=======
 If your application requires more fine-grained control than is allowed by `MultiTurnEnv`, you may want to inherit from the base `Environment` functionality directly and override the `rollout` method.
 
 
@@ -303,4 +300,3 @@ If you use this code in your research, please cite:
 - Default patterns for hosted resources such as code sandboxes, auxiliary models, and MCP servers
 - Multimodal input support
 - Non-increasing token sequences via REINFORCE
->>>>>>> feature/terminalbench-env
