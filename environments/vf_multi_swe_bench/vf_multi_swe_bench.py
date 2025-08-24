@@ -36,6 +36,25 @@ def load_environment(
     else:
         runner = StubRunner(expected_token=expected_token)
 
-    env = vf.MultiSWEEnv(runner=runner, task_id=task_id)
+    # Provide a minimal single-example eval dataset if not supplied,
+    # so the environment can run directly via `vf-eval`.
+    eval_dataset = kwargs.get("eval_dataset")
+    if eval_dataset is None:
+        from datasets import Dataset
+
+        instruction = (
+            "Propose a unified diff patch to fix the failing tests. "
+            "Respond with only the patch."
+        )
+        eval_dataset = Dataset.from_dict(
+            {
+                "prompt": [[{"role": "user", "content": instruction}]],
+                "answer": ["OK"],
+                "info": [{}],
+                "task": [task_id],
+            }
+        )
+
+    env = vf.MultiSWEEnv(runner=runner, task_id=task_id, eval_dataset=eval_dataset)
     env.rubric = vf.MultiSWERubric()  # simple pass/fail rubric
     return env
