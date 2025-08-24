@@ -3,46 +3,47 @@ from __future__ import annotations
 from typing import Any
 
 from .multiturn_env import MultiTurnEnv
-from ..integrations.multiswebench import MultiSWERunner, PatchStepResult
+from ..integrations.multiswebench import EvalResult, MultiSWERunner
 from ..types import Messages, State
 
 
 class MultiSWEEnv(MultiTurnEnv):
-    """Environment adapter for Multi‑SWE‑Bench style program repair tasks.
+    """Environment adapter for Multi-SWE-Bench single-instance evaluation.
 
-    Each assistant message is interpreted as a proposed patch (e.g., unified
-    diff). The runner applies the patch and runs tests. The resulting
-    observation (test output summary) is appended as a tool message.
-    Completion is signaled by the runner when tests pass or attempts are
-    exhausted.
+    The model is expected to produce a patch (e.g., unified diff) as plain text.
+    On each turn we extract the latest assistant message as the candidate patch
+    and ask the configured runner to evaluate it for the selected instance.
+
+    A minimal rubric can then reward success (resolved=True) with 1.0.
     """
 
     def __init__(
         self,
         runner: MultiSWERunner,
-        task_id: str,
-        max_turns: int = 6,
+        instance_id: str | None = None,
+        *,
+        task_id: str | None = None,
+        max_turns: int = 1,
         **kwargs: Any,
     ) -> None:
+        """Create a Multi‑SWE‑Bench environment.
+
+        Args:
+            runner: Concrete runner (official harness, OpenHands, or stub).
+            instance_id: Identifier of the dataset instance (preferred).
+            task_id: Back‑compat alias for instance_id.
+            max_turns: Max turns (defaults to single‑turn evaluation).
+        """
         super().__init__(**kwargs)
         self.runner = runner
-        self.task_id = task_id
+        self.instance_id = instance_id or task_id or "example-instance"
         self.max_turns = max_turns
 
     def setup_state(self, state: State | None = None) -> State:
         st: State = state or {}
-        if st.get("_init_done"):
-            return st
-        initial_obs = self.runner.start(self.task_id)
-        st.update(
-            {
-                "_init_done": True,
-                "turn": 0,
-                "observation": initial_obs,
-                "done": False,
-                "passed": False,
-            }
-        )
+        st.setdefault("turn", 0)
+        st.setdefault("done", False)
+        st.setdefault("passed", False)
         return st
 
     def _extract_patch(self, messages: Messages) -> str:
@@ -51,25 +52,24 @@ class MultiSWEEnv(MultiTurnEnv):
             content = last.get("content", "") if isinstance(last, dict) else str(last)
         else:
             content = str(messages)
-        return str(content)
+        return str(content).strip()
 
-    def _append_tool_observation(self, messages: list[dict[str, Any]], obs: str) -> None:
-        messages.append({"role": "tool", "content": obs, "name": "tests"})
-
-    def is_completed(self, messages: Messages, state: State) -> bool:  # noqa: ARG002
+    def is_completed(self, messages: Messages, state: State, **kwargs) -> bool:  # noqa: ARG002
         return bool(state.get("done") or state.get("turn", 0) >= self.max_turns)
 
-    def env_response(self, messages: Messages, state: State) -> tuple[Messages, State]:
+    def env_response(self, messages: Messages, state: State, **kwargs) -> tuple[Messages, State]:
         st = self.setup_state(state)
         st["turn"] = st.get("turn", 0) + 1
-        patch_text = self._extract_patch(messages)
-        result: PatchStepResult = self.runner.apply_patch(patch_text)
-        st.update({"done": result.done, "passed": result.passed, "observation": result.observation})
-        # Clone messages to list for augmentation
+        patch = self._extract_patch(messages)
+        result: EvalResult = self.runner.evaluate(instance_id=self.instance_id, patch=patch)
+        passed = bool(result.resolved)
+        st.update({"done": True, "passed": passed, "report": result.info})
+        # No additional tool output; simply echo a brief status for traceability
+        obs = "resolved" if passed else "unresolved"
         msgs: list[dict[str, Any]]
         if isinstance(messages, list):
             msgs = list(messages)
         else:
-            msgs = [{"role": "user", "content": str(messages)}]
-        self._append_tool_observation(msgs, result.observation)
+            msgs = [{"role": "assistant", "content": str(messages)}]
+        msgs.append({"role": "tool", "name": "msb", "content": obs})
         return msgs, st
