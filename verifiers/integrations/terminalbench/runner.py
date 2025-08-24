@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 
 
@@ -62,10 +63,10 @@ class StubRunner:
 
 
 class HarnessRunner:
-    """Terminal‑Bench runner using the official harness with the Terminus‑1 agent.
+    """Terminal‑Bench runner using the official harness with the Terminus agent.
 
     This runner shells out to a user‑configurable module entry point for the
-    Terminal‑Bench harness and runs a single task with the Terminus‑1 agent.
+    Terminal‑Bench harness and runs a single task with the Terminus agent.
 
     Notes:
     - The Terminal‑Bench harness typically controls the agent end‑to‑end. Since
@@ -80,8 +81,9 @@ class HarnessRunner:
         output_path: str | None = None,
         entrypoint_module: str | None = None,
         entrypoint_args: list[str] | None = None,
-        agent_name: str = "terminus_1",
+        agent_name: str = "terminus",
         extra_env: dict[str, str] | None = None,
+        timeout_sec: int = 1800,
     ) -> None:
         self.dataset_path = str(dataset_path)
         self.output_path = str(output_path or Path("./tb_runs").absolute())
@@ -89,6 +91,7 @@ class HarnessRunner:
         self.entrypoint_args = entrypoint_args or []
         self.agent_name = agent_name
         self.extra_env = extra_env or {}
+        self.timeout_sec = timeout_sec
 
         Path(self.output_path).mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +104,7 @@ class HarnessRunner:
         self._current_task = task_id
         self._done = False
         self._passed = False
-        self._observation = "Task prepared. Provide a shell command if desired; the harness will run Terminus‑1 for the task on first step."
+        self._observation = "Task prepared. Provide a shell command if desired; the harness will run Terminus for the task on first step."
         return self._observation
 
     def _run_harness(self) -> tuple[bool, str]:
@@ -118,7 +121,7 @@ class HarnessRunner:
             }
             cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
             cmd = [
-                shutil.which("python") or "python",
+                sys.executable,
                 "-m",
                 self.entrypoint_module,
                 "--config",
@@ -127,14 +130,23 @@ class HarnessRunner:
             ]
             env = os.environ.copy()
             env.update(self.extra_env)
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env,
-            )
-            out = proc.stdout
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    timeout=self.timeout_sec,
+                )
+                out = proc.stdout
+                if proc.returncode != 0:
+                    tail = out[-2000:] if out else ""
+                    return False, f"TB harness exited with code {proc.returncode}.\n{tail}"
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout or "") + (e.stderr or "")
+                return False, f"TB harness timed out after {self.timeout_sec}s.\n{out[-2000:]}"
+
             # Attempt robust success detection across plausible report names
             resolved = False
             for name in ("final_report.json", "report.json", "results.json"):
@@ -166,5 +178,5 @@ class HarnessRunner:
         resolved, logs = self._run_harness()
         self._done = True
         self._passed = resolved
-        self._observation = ("All tests passed.\n" if resolved else "Tests failed.\n") + logs[-2000:]
-        return StepResult(self._observation, self._done, self._passed, {"task": self._current_task or "", "logs_tail": logs[-2000:]})
+        self._observation = ("All tests passed.\n" if resolved else "Tests failed.\n") + (logs[-2000:] if logs else "")
+        return StepResult(self._observation, self._done, self._passed, {"task": self._current_task or "", "logs_tail": (logs[-2000:] if logs else "")})
