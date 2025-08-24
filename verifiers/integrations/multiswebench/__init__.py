@@ -9,4 +9,9 @@ and decide pass/fail. This package also includes a `StubRunner` suitable for
 CI smoke tests.
 """
 
-from .runner import MultiSWERunner, PatchStepResult, StubRunner  # noqa: F401
+from .runner import (
+    MultiSWERunner,
+    PatchStepResult,
+    StubRunner,
+    HarnessRunner,
+)  # noqa: F401
