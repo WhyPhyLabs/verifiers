@@ -49,6 +49,9 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
             info["sources"] = it["sources"]
         if "gold_urls" in it:
             info["gold_urls"] = it["gold_urls"]
+        # optional oracle evidence
+        if "evidence" in it:
+            info["evidence"] = it["evidence"]
         infos.append(info)
     return Dataset.from_dict({"prompt": prompts, "answer": answers, "info": infos})
 
@@ -241,6 +244,21 @@ class BFCLV4SingleTurnEnv(ToolEnv):
         )
 
 
+def _inject_oracle(ds: Dataset) -> Dataset:
+    # Prepend a system message with evidence when present
+    def add_evidence(prompt: list[dict], info: dict) -> list[dict]:
+        ev = info.get("evidence")
+        if not ev:
+            return prompt
+        sys_msg = {"role": "system", "content": f"### Evidence (oracle)\n{ev}"}
+        return [sys_msg] + prompt
+
+    prompts = []
+    for i in range(len(ds)):
+        prompts.append(add_evidence(ds[i]["prompt"], ds[i]["info"]))
+    return Dataset.from_dict({"prompt": prompts, "answer": ds["answer"], "info": ds["info"]})
+
+
 class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
     """Single-turn (B2): oracle evidence; no tools."""
 
@@ -248,8 +266,11 @@ class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
         self,
         dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
+        inject_oracle: bool = True,
         **kwargs: Any,
     ):
+        if dataset is not None and inject_oracle:
+            dataset = _inject_oracle(dataset)
         super().__init__(
             dataset=dataset,
             eval_dataset=eval_dataset,
@@ -265,9 +286,10 @@ def load_environment(
     mode: Literal["multi", "single"] = "multi",
     single_turn_variant: Literal["b1", "b2"] = "b1",
     dataset_file: str | None = None,
+    dataset: Dataset | None = None,
     **kwargs: Any,
 ):
-    ds = None
+    ds = dataset
     if dataset_file:
         items = _read_jsonl(dataset_file)
         ds = _to_dataset_v4(items)
