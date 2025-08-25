@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -12,6 +14,21 @@ from datasets import Dataset
 from verifiers import ToolEnv, SingleTurnEnv, Rubric, Parser
 from verifiers.types import Messages
 
+try:
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover - optional dep
+    httpx = None  # type: ignore
+
+try:
+    from duckduckgo_search import DDGS  # type: ignore
+except Exception:  # pragma: no cover - optional dep
+    DDGS = None  # type: ignore
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception:  # pragma: no cover - optional dep
+    BeautifulSoup = None  # type: ignore
+
 
 @dataclass
 class V4Config:
@@ -20,6 +37,9 @@ class V4Config:
     failure_seed: int = 1234
     offline_cache_dir: Optional[str] = None
     max_turns: int = 8
+    live: bool = False  # live web mode for search/fetch
+    timeout_s: float = 8.0
+    max_retries: int = 2
 
 
 def _read_jsonl(path: str | Path) -> list[dict]:
@@ -49,7 +69,6 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
             info["sources"] = it["sources"]
         if "gold_urls" in it:
             info["gold_urls"] = it["gold_urls"]
-        # optional oracle evidence
         if "evidence" in it:
             info["evidence"] = it["evidence"]
         infos.append(info)
@@ -126,29 +145,129 @@ class _Cache:
         p.write_text(s, encoding="utf-8")
 
 
-def _mk_v4_tools(cfg: V4Config) -> list[Callable]:
+# --- Modular Search API ---
+class SearchClient:
+    def search(self, keywords: str, max_results: int = 10, region: str = "wt-wt") -> list[dict]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class MockSearchClient(SearchClient):
+    def __init__(self, include_snippets: bool = True):
+        self.include_snippets = include_snippets
+
+    def search(self, keywords: str, max_results: int = 10, region: str = "wt-wt") -> list[dict]:
+        res = [{"title": f"About {keywords}", "url": f"https://example.com/{keywords.replace(' ', '_')}"}]
+        if self.include_snippets:
+            res[0]["snippet"] = f"Snippet for {keywords}"
+        return res[:max_results]
+
+
+class DDGSearchClient(SearchClient):
+    def __init__(self, include_snippets: bool = True):
+        self.include_snippets = include_snippets
+
+    def search(self, keywords: str, max_results: int = 10, region: str = "wt-wt") -> list[dict]:
+        if DDGS is None:
+            return []
+        out: list[dict] = []
+        with DDGS() as ddgs:  # type: ignore
+            for r in ddgs.text(keywords, region=region, max_results=max_results):  # type: ignore
+                item = {"title": r.get("title", ""), "url": r.get("href", "")}
+                if self.include_snippets and r.get("body"):
+                    item["snippet"] = r.get("body")
+                out.append(item)
+        return out[:max_results]
+
+
+# --- Fetch (live or mock) with allowlist & retries ---
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+def _is_allowed_url(url: str) -> bool:
+    try:
+        if not any(url.lower().startswith(s + "://") for s in _ALLOWED_SCHEMES):
+            return False
+        # Disallow IP literals that are private/reserved
+        host = url.split("://", 1)[1].split("/", 1)[0]
+        # strip port
+        host = host.split(":")[0]
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
+                return False
+        except ValueError:
+            # not an IP; allow
+            pass
+        return True
+    except Exception:
+        return False
+
+
+@dataclass
+class Fetcher:
+    timeout_s: float
+    max_retries: int
+    live: bool
+
+    def fetch(self, url: str, mode: Literal["raw", "markdown", "truncate"] = "raw") -> str:
+        if not _is_allowed_url(url):
+            return "ERROR: URL not allowed"
+        if not self.live or httpx is None:
+            body = f"Content fetched from {url}\n"
+            return self._postprocess(body, mode)
+        delay = 0.2
+        for attempt in range(self.max_retries + 1):
+            try:
+                with httpx.Client(timeout=self.timeout_s, follow_redirects=False) as client:  # type: ignore
+                    resp = client.get(url)
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"HTTP {resp.status_code}")
+                    text = resp.text
+                    return self._postprocess(text, mode)
+            except Exception:
+                if attempt >= self.max_retries:
+                    return "ERROR: fetch failed"
+                time.sleep(delay)
+                delay *= 2
+        return "ERROR: fetch failed"
+
+    def _postprocess(self, text: str, mode: str) -> str:
+        if mode == "truncate":
+            return text[:256]
+        if mode == "markdown":
+            # best-effort HTML→text if BeautifulSoup available
+            if BeautifulSoup is not None and ("<html" in text.lower() or "<p" in text.lower()):
+                try:
+                    soup = BeautifulSoup(text, "html.parser")  # type: ignore
+                    md = soup.get_text("\n")
+                    return md
+                except Exception:
+                    pass
+        return text
+
+
+def _mk_v4_tools(cfg: V4Config, search_client: Optional[SearchClient] = None) -> list[Callable]:
     cache = _Cache(cfg.offline_cache_dir)
     rng = random.Random(cfg.failure_seed)
+    search_client = search_client or (DDGSearchClient(cfg.include_snippets) if cfg.live else MockSearchClient(cfg.include_snippets))
+    fetcher = Fetcher(timeout_s=cfg.timeout_s, max_retries=cfg.max_retries, live=cfg.live)
 
     def duckduckgo_search(keywords: str, max_results: int = 10, region: str = "wt-wt") -> list[dict]:
-        """Return [{'title': str, 'url': str, 'snippet'?: str}]"""
         key = f"search::{region}::{max_results}::{keywords}"
         if cache.root:
             obj = cache.get_json(key)
             if obj is not None:
                 return obj
-            if cfg.offline_cache_dir is not None:
+            if cfg.offline_cache_dir is not None and not cfg.live:
                 return []
-        result = [{"title": f"About {keywords}", "url": f"https://example.com/{keywords.replace(' ', '_')}"}]
-        if cfg.include_snippets:
-            result[0]["snippet"] = f"Snippet for {keywords}"
+        result = search_client.search(keywords, max_results=max_results, region=region)
         if cache.root:
             cache.put_json(key, result)
         return result[:max_results]
 
     def fetch_url_content(url: str, mode: Literal["raw", "markdown", "truncate"] = "raw") -> str:
-        """Return page content; simulate failures via seeded RNG; cache results."""
         key = f"page::{mode}::{url}"
+        # Failure injection
         if cfg.fetch_fail_rate > 0:
             u = rng.random()
             if u < cfg.fetch_fail_rate:
@@ -165,14 +284,10 @@ def _mk_v4_tools(cfg: V4Config) -> list[Callable]:
             txt = cache.get_text(key)
             if txt is not None:
                 return txt
-            if cfg.offline_cache_dir is not None:
+            if cfg.offline_cache_dir is not None and not cfg.live:
                 return ""
-        body = f"Content fetched from {url}\n"
-        if mode == "markdown":
-            body = f"# {url}\n\n{body}"
-        elif mode == "truncate":
-            body = body[:32]
-        if cache.root:
+        body = fetcher.fetch(url, mode)
+        if cache.root and body and not body.startswith("ERROR:"):
             cache.put_text(key, body)
         return body
 
@@ -180,8 +295,6 @@ def _mk_v4_tools(cfg: V4Config) -> list[Callable]:
 
 
 class BFCLV4WebEnv(ToolEnv):
-    """Multi-turn web-search ToolEnv with exact tool signatures and failure injection."""
-
     def __init__(
         self,
         dataset: Dataset | None = None,
@@ -191,6 +304,10 @@ class BFCLV4WebEnv(ToolEnv):
         failure_seed: int = 1234,
         offline_cache_dir: Optional[str] = None,
         max_turns: int = 8,
+        live: bool = False,
+        search_client: Optional[SearchClient] = None,
+        timeout_s: float = 8.0,
+        max_retries: int = 2,
         **kwargs: Any,
     ):
         cfg = V4Config(
@@ -199,8 +316,11 @@ class BFCLV4WebEnv(ToolEnv):
             failure_seed=failure_seed,
             offline_cache_dir=offline_cache_dir,
             max_turns=max_turns,
+            live=live,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
         )
-        tools = _mk_v4_tools(cfg)
+        tools = _mk_v4_tools(cfg, search_client=search_client)
         super().__init__(
             tools=tools,
             max_turns=max_turns,
@@ -213,8 +333,6 @@ class BFCLV4WebEnv(ToolEnv):
 
 
 class BFCLV4SingleTurnEnv(ToolEnv):
-    """Single-turn (B1): ToolEnv with max_turns=1; parallel tool calls allowed."""
-
     def __init__(
         self,
         dataset: Dataset | None = None,
@@ -223,6 +341,10 @@ class BFCLV4SingleTurnEnv(ToolEnv):
         fetch_fail_rate: float = 0.0,
         failure_seed: int = 1234,
         offline_cache_dir: Optional[str] = None,
+        live: bool = False,
+        search_client: Optional[SearchClient] = None,
+        timeout_s: float = 8.0,
+        max_retries: int = 2,
         **kwargs: Any,
     ):
         cfg = V4Config(
@@ -231,8 +353,11 @@ class BFCLV4SingleTurnEnv(ToolEnv):
             failure_seed=failure_seed,
             offline_cache_dir=offline_cache_dir,
             max_turns=1,
+            live=live,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
         )
-        tools = _mk_v4_tools(cfg)
+        tools = _mk_v4_tools(cfg, search_client=search_client)
         super().__init__(
             tools=tools,
             max_turns=1,
@@ -245,7 +370,6 @@ class BFCLV4SingleTurnEnv(ToolEnv):
 
 
 def _inject_oracle(ds: Dataset) -> Dataset:
-    # Prepend a system message with evidence when present
     def add_evidence(prompt: list[dict], info: dict) -> list[dict]:
         ev = info.get("evidence")
         if not ev:
@@ -260,8 +384,6 @@ def _inject_oracle(ds: Dataset) -> Dataset:
 
 
 class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
-    """Single-turn (B2): oracle evidence; no tools."""
-
     def __init__(
         self,
         dataset: Dataset | None = None,

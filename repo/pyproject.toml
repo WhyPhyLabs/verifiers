@@ -1,0 +1,10 @@
+[project]
+name = "verifiers"
+version = "0.1.2.post1"
+
+[project.optional-dependencies]
+bfcl = [
+  "httpx>=0.27",
+  "duckduckgo_search>=5.3",
+  "beautifulsoup4>=4.12",
+]

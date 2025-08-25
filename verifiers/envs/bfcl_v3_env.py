@@ -43,44 +43,34 @@ def _to_dataset_v3(items: list[dict]) -> Dataset:
         info = dict(it.get("info", {}))
         if "expected" in it:
             info["expected"] = it["expected"]
+        # optional rubric specs for multi-turn
+        if "final_state" in it:
+            info["final_state"] = it["final_state"]
+        if "tool_sequence" in it:
+            info["tool_sequence"] = it["tool_sequence"]
         infos.append(info)
     return Dataset.from_dict({"prompt": prompts, "info": infos})
 
 
 def _mk_v3_tools(statebox: dict[str, Any]) -> list[Callable]:
     def set_kv(key: str, value: str) -> str:
-        """Set a string value in the environment state.
-
-        Args:
-            key (str): The key to set.
-            value (str): The string value.
-        """
         statebox.setdefault("kv", {})[key] = value
+        # record tool
+        statebox.setdefault("tool_names", []).append("set_kv")
         return "OK"
 
     def get_kv(key: str) -> str:
-        """Get a string value from the environment state.
-
-        Args:
-            key (str): The key to read.
-        """
+        statebox.setdefault("tool_names", []).append("get_kv")
         return str(statebox.get("kv", {}).get(key, ""))
 
     def secret_add(x: int, y: int) -> int:
-        """Add two integers (withheld initially in Missing-Functions scenarios).
-
-        Args:
-            x (int): first operand
-            y (int): second operand
-        """
+        statebox.setdefault("tool_names", []).append("secret_add")
         return x + y
 
     return [set_kv, get_kv, secret_add]
 
 
 class BFCLV3Env(ToolEnv):
-    """BFCL v3 multi-turn ToolEnv with missing-function gating."""
-
     def __init__(
         self,
         dataset: Dataset | None = None,
@@ -109,6 +99,9 @@ class BFCLV3Env(ToolEnv):
 
     def setup_state(self, state: State, **kwargs) -> State:
         state["tool_stage"] = 0
+        # expose statebox so rubric can inspect it post-rollout
+        state["kv"] = self._statebox.setdefault("kv", {})
+        state["tool_names"] = self._statebox.setdefault("tool_names", [])
         return state
 
     def _should_reveal_by_text(self, messages: Messages) -> bool:
@@ -171,8 +164,6 @@ class BFCLV3Env(ToolEnv):
 
 
 class BFCLV3SingleTurnEnv(ToolEnv):
-    """Single-turn 'next-action' probe built from v3 trajectories."""
-
     def __init__(
         self,
         dataset: Dataset | None = None,
@@ -195,22 +186,42 @@ class BFCLV3SingleTurnEnv(ToolEnv):
 # Minimal rubrics for v3
 
 def _single_turn_exec_match(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
-    """If info.expected.output is present, match last tool message content against it; else 0."""
     exp = (info or {}).get("expected", {})
     want = exp.get("output")
     if not want:
         return 0.0
     if isinstance(completion, list):
-        # find last tool message
         for m in reversed(completion):
             if isinstance(m, dict) and m.get("role") == "tool":
                 return 1.0 if str(m.get("content", "")) == str(want) else 0.0
     return 0.0
 
 
+def _multiturn_state_goal(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
+    final = (info or {}).get("final_state", {})
+    kv = state.get("kv", {})
+    for k, v in final.items():
+        if str(kv.get(k, None)) != str(v):
+            return 0.0
+    return 1.0 if final else 0.0
+
+
+def _multiturn_sequence_match(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
+    want = (info or {}).get("tool_sequence", [])
+    got = state.get("tool_names", [])
+    if not want:
+        return 0.0
+    return 1.0 if list(want) == list(got[: len(want)]) else 0.0
+
+
 class BFCLV3SingleTurnRubric(Rubric):
     def __init__(self):
         super().__init__(funcs=[_single_turn_exec_match], weights=[1.0], parser=Parser())
+
+
+class BFCLV3MultiTurnRubric(Rubric):
+    def __init__(self):
+        super().__init__(funcs=[_multiturn_state_goal, _multiturn_sequence_match], weights=[1.0, 0.5], parser=Parser())
 
 
 def load_environment(
