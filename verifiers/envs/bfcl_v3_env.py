@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal
 
 from datasets import Dataset
 
@@ -111,31 +111,61 @@ class BFCLV3Env(ToolEnv):
         state["tool_stage"] = 0
         return state
 
-    def _should_reveal(self, messages: Messages) -> bool:
+    def _should_reveal_by_text(self, messages: Messages) -> bool:
         if not isinstance(messages, list) or not messages:
             return False
         last = messages[-1]
         if last.get("role") == "assistant" and isinstance(last.get("content"), str):
             txt = last["content"].lower()
-            return "missing function" in txt or "reveal tool" in txt
+            triggers = (
+                "missing function",
+                "reveal tool",
+                "hidden tool",
+                "unlock tool",
+                "unavailable function",
+            )
+            return any(t in txt for t in triggers)
+        return False
+
+    def _should_reveal_by_attempt(self, messages: Messages) -> bool:
+        # If assistant tried to call the withheld tool before reveal
+        if not isinstance(messages, list) or not messages:
+            return False
+        last = messages[-1]
+        tcs = last.get("tool_calls") if isinstance(last, dict) else None
+        if not tcs:
+            return False
+        # Accept both dict-like and object-like with .function
+        for tc in tcs:
+            try:
+                name = tc["function"]["name"] if isinstance(tc, dict) else tc.function.name
+            except Exception:
+                name = None
+            if name == self._withheld_name:
+                return True
         return False
 
     def _expose_withheld(self):
         if self._revealed:
             return
         self.tools.append(self._withheld_tool)
-        # Rebuild mapping/schema for execution on next turn
         self.tool_map[self._withheld_name] = self._withheld_tool
         self._revealed = True
 
     def env_response(self, messages: Messages, state: State, **kwargs) -> tuple[Messages, State]:
-        # If the assistant called tools, run ToolEnv's handling first
+        extra: list[dict] = []
+        # If model attempted the withheld tool, reveal it and inject docs; skip executing tools this turn
+        if self._enable_missing and not self._revealed and self._should_reveal_by_attempt(messages):
+            self._expose_withheld()
+            extra.append({"role": "user", "content": self._reveal_doc})
+            state["tool_stage"] = 1
+            return extra, state
+
         tool_msgs: list[dict] = []
         if isinstance(messages, list) and messages and "tool_calls" in messages[-1]:
             tool_msgs, state = super().env_response(messages, state, **kwargs)
 
-        extra: list[dict] = []
-        if self._enable_missing and not self._revealed and self._should_reveal(messages):
+        if self._enable_missing and not self._revealed and self._should_reveal_by_text(messages):
             self._expose_withheld()
             extra.append({"role": "user", "content": self._reveal_doc})
             state["tool_stage"] = 1

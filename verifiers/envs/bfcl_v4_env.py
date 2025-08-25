@@ -255,6 +255,7 @@ class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
             eval_dataset=eval_dataset,
             parser=Parser(),
             rubric=BFCLV4Rubric(),
+            max_turns=1,
             **kwargs,
         )
 
