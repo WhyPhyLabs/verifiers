@@ -128,14 +128,12 @@ class BFCLV3Env(ToolEnv):
         return False
 
     def _should_reveal_by_attempt(self, messages: Messages) -> bool:
-        # If assistant tried to call the withheld tool before reveal
         if not isinstance(messages, list) or not messages:
             return False
         last = messages[-1]
         tcs = last.get("tool_calls") if isinstance(last, dict) else None
         if not tcs:
             return False
-        # Accept both dict-like and object-like with .function
         for tc in tcs:
             try:
                 name = tc["function"]["name"] if isinstance(tc, dict) else tc.function.name
@@ -154,7 +152,6 @@ class BFCLV3Env(ToolEnv):
 
     def env_response(self, messages: Messages, state: State, **kwargs) -> tuple[Messages, State]:
         extra: list[dict] = []
-        # If model attempted the withheld tool, reveal it and inject docs; skip executing tools this turn
         if self._enable_missing and not self._revealed and self._should_reveal_by_attempt(messages):
             self._expose_withheld()
             extra.append({"role": "user", "content": self._reveal_doc})
@@ -195,13 +192,35 @@ class BFCLV3SingleTurnEnv(ToolEnv):
         )
 
 
+# Minimal rubrics for v3
+
+def _single_turn_exec_match(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
+    """If info.expected.output is present, match last tool message content against it; else 0."""
+    exp = (info or {}).get("expected", {})
+    want = exp.get("output")
+    if not want:
+        return 0.0
+    if isinstance(completion, list):
+        # find last tool message
+        for m in reversed(completion):
+            if isinstance(m, dict) and m.get("role") == "tool":
+                return 1.0 if str(m.get("content", "")) == str(want) else 0.0
+    return 0.0
+
+
+class BFCLV3SingleTurnRubric(Rubric):
+    def __init__(self):
+        super().__init__(funcs=[_single_turn_exec_match], weights=[1.0], parser=Parser())
+
+
 def load_environment(
     version: Literal["v3"] = "v3",
     mode: Literal["multi", "single"] = "multi",
     dataset_file: str | None = None,
+    dataset: Dataset | None = None,
     **kwargs: Any,
 ):
-    ds = None
+    ds = dataset
     if dataset_file:
         items = _read_jsonl(dataset_file)
         ds = _to_dataset_v3(items)
