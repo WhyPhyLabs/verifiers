@@ -47,8 +47,3 @@ dev = [
 packages = ["vf_bfcl"]
 
 
-[tool.setuptools.package-dir]
-vf_bfcl = "."
-
-
-
