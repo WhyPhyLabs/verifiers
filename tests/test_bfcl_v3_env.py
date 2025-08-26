@@ -20,6 +20,36 @@ def test_v3_missing_functions_gating_reveals_tool_and_injects_doc():
     assert tool_msg["role"] == "tool" and tool_msg["content"] == "5"
 
 
+def test_v3_missing_functions_gating_benign_text_no_reveal():
+    """Test that benign assistant text does NOT reveal the missing tool."""
+    ds = Dataset.from_dict({"prompt": [[{"role": "user", "content": "start"}]], "info": [{}]})
+    env = BFCLV3Env(dataset=ds, enable_missing_functions=True)
+    
+    # Assistant says benign things that don't trigger reveal
+    benign_messages = [
+        [{"role": "assistant", "content": "I need to calculate something."}],
+        [{"role": "assistant", "content": "Let me think about this problem."}],
+        [{"role": "assistant", "content": "I can help you with that."}],
+        [{"role": "assistant", "content": "The answer is 42."}],
+        [{"role": "assistant", "content": "I need to use the available tools."}],
+    ]
+    
+    for assistant_msg in benign_messages:
+        # Reset the environment for each test
+        env = BFCLV3Env(dataset=ds, enable_missing_functions=True)
+        
+        # This should NOT reveal the tool
+        env_msgs, state = env.env_response(assistant_msg, {"turn": 1})
+        
+        # No user messages should be added
+        user_msgs = [m for m in env_msgs if m["role"] == "user"]
+        assert len(user_msgs) == 0, f"Benign message should not reveal tool: {assistant_msg[0]['content']}"
+        
+        # Tool should still be hidden
+        assert "secret_add" not in env.tool_map
+        assert not env._revealed
+
+
 def test_v3_single_turn_next_action_env_builds_and_executes():
     ds = Dataset.from_dict(
         {
