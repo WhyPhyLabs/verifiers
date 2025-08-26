@@ -23,7 +23,8 @@ def test_v4_search_cache_behavior(tmp_path):
 
     # Populate cache for a known key using online env and write manually into cache of offline env
     # Use the same key formation logic: search::{region}::{max_results}::{keywords}
-    key = f"search::wt-wt::1::bfcl v4"
+    # Note: The cache implementation sanitizes keys, so we need to use the sanitized version
+    key = f"search__wt-wt__1__bfcl v4"  # sanitized version of "search::wt-wt::1::bfcl v4"
     # Get cached object from online env by calling again (ensures deterministic output)
     cached = env_online.tool_map["duckduckgo_search"](keywords="bfcl v4", max_results=1, region="wt-wt")  # type: ignore
     # Write to offline cache file

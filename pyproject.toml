@@ -94,6 +94,8 @@ envs = [
     "brave-search",
 ]
 
+# BFCL environment dependencies - SOURCE OF TRUTH
+# If updating these, also update environments/vf_bfcl/pyproject.toml to maintain consistency
 bfcl = [
     "httpx",
     "duckduckgo-search",
@@ -160,6 +162,7 @@ markers = [
     "parsers: marks tests for parser components",
     "rubrics: marks tests for rubric components",
     "environments: marks tests for environment components",
+    "bfcl_e2e: marks tests for BFCL CLI end-to-end tests",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

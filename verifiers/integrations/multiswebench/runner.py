@@ -299,15 +299,19 @@ class OpenHandsRunner:
                 pass
 
 logger = logging.getLogger(__name__)
-            resolved, info = _report_indicates_resolved(work_out)
-            try:
-                if self.output_dir:
-                    self.output_dir.mkdir(parents=True, exist_ok=True)
-                    for p in work_out.rglob("*"):
-                        if p.is_file():
-                            dst = self.output_dir / p.relative_to(work_out)
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(p, dst)
-            except Exception:
-                pass
-            return EvalResult(resolved=resolved, info=info)
+
+def _report_indicates_resolved(work_out):
+    # Implementation needed - this is a placeholder
+    # Should analyze work_out to determine if the issue is resolved
+    resolved, info = False, {}
+    try:
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            for p in work_out.rglob("*"):
+                if p.is_file():
+                    dst = self.output_dir / p.relative_to(work_out)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(p, dst)
+    except Exception:
+        pass
+    return EvalResult(resolved=resolved, info=info)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -40,7 +41,12 @@ def _to_dataset_v3(items: list[dict]) -> Dataset:
         else:
             q = it.get("question") or it.get("query") or ""
             prompts.append([{"role": "user", "content": q}])
-        info = dict(it.get("info", {}))
+        info = it.get("info", {})
+        if isinstance(info, list) and len(info) > 0:
+            info = info[0]
+        elif isinstance(info, list):
+            info = {}
+        info = dict(info)
         if "expected" in it:
             info["expected"] = it["expected"]
         # optional rubric specs for multi-turn
@@ -79,16 +85,18 @@ class BFCLV3Env(ToolEnv):
         enable_missing_functions: bool = True,
         **kwargs: Any,
     ):
-        self._statebox: dict[str, Any] = {}
+        self._statebox_ctor = self._create_statebox_factory
+        self._statebox: dict[str, Any] = self._statebox_ctor()
         all_tools = _mk_v3_tools(self._statebox)
         self._withheld_name = "secret_add"
         self._withheld_tool = next(t for t in all_tools if t.__name__ == self._withheld_name)
-        start_tools = [t for t in all_tools if t.__name__ != self._withheld_name] if enable_missing_functions else all_tools
+        self._start_tools = [t for t in all_tools if t.__name__ != self._withheld_name] if enable_missing_functions else all_tools
+        self._all_tools = all_tools
         self._enable_missing = enable_missing_functions
         self._revealed = False
         self._reveal_doc = V3Config().withheld_tool_doc
         super().__init__(
-            tools=start_tools,
+            tools=list(self._start_tools),  # Make a copy
             max_turns=max_turns,
             dataset=dataset,
             eval_dataset=eval_dataset,
@@ -97,9 +105,21 @@ class BFCLV3Env(ToolEnv):
             **kwargs,
         )
 
+    def _create_statebox_factory(self) -> dict[str, Any]:
+        """Factory function to create a fresh statebox for each episode."""
+        return {}
+
     def setup_state(self, state: State, **kwargs) -> State:
+        # Reset state for new episode - prevent leakage between rollouts
+        self._statebox = self._statebox_ctor()
+        self._revealed = False
+        
+        # Reset tools to initial state (with or without withheld tool based on gating)
+        self.tools = list(self._start_tools)  # Fresh copy
+        self.tool_map = {t.__name__: t for t in self.tools}
+        
+        # Initialize state tracking for this episode
         state["tool_stage"] = 0
-        # expose statebox so rubric can inspect it post-rollout
         state["kv"] = self._statebox.setdefault("kv", {})
         state["tool_names"] = self._statebox.setdefault("tool_names", [])
         return state
@@ -168,19 +188,21 @@ class BFCLV3SingleTurnEnv(ToolEnv):
         self,
         dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
+        score_mode: Literal["exec", "ast"] = "exec",
         **kwargs: Any,
     ):
         self._statebox: dict[str, Any] = {}
         tools = _mk_v3_tools(self._statebox)
         super().__init__(
             tools=tools,
-            max_turns=1,
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=Rubric(),
+            rubric=BFCLV3SingleTurnRubric(score_mode=score_mode),
             **kwargs,
         )
+        # Force max_turns to 1 for single-turn environment
+        self.max_turns = 1
 
 
 # Minimal rubrics for v3
@@ -195,6 +217,71 @@ def _single_turn_exec_match(prompt: Messages, completion: Messages, answer: str,
             if isinstance(m, dict) and m.get("role") == "tool":
                 return 1.0 if str(m.get("content", "")) == str(want) else 0.0
     return 0.0
+
+
+def _single_turn_ast_match(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
+    """AST-based single-turn rubric for leaderboard comparability with BFCL v1/v2."""
+    exp = (info or {}).get("expected", {})
+    want_tool = exp.get("tool")
+    want_args = exp.get("args", {})
+    
+    if not want_tool:
+        return 0.0
+    
+    if not isinstance(completion, list):
+        return 0.0
+    
+    # Find the last tool call in completion
+    tool_call = None
+    for m in reversed(completion):
+        if isinstance(m, dict) and m.get("role") == "assistant" and "tool_calls" in m:
+            tool_calls = m.get("tool_calls", [])
+            if tool_calls:
+                tool_call = tool_calls[0]  # Take first tool call
+                break
+    
+    if not tool_call:
+        return 0.0
+    
+    # Parse tool call function and arguments
+    try:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function", {})
+            tool_name = function.get("name")
+            args_str = function.get("arguments", "{}")
+            
+            # Parse arguments
+            if isinstance(args_str, str):
+                args = json.loads(args_str)
+            else:
+                args = args_str
+        else:
+            # Handle OpenAI function call format
+            tool_name = tool_call.function.name if hasattr(tool_call, 'function') else None
+            args = json.loads(tool_call.function.arguments) if hasattr(tool_call, 'function') else {}
+        
+        # Check tool name matches
+        if tool_name != want_tool:
+            return 0.0
+        
+        # Check arguments match (using AST equivalence for complex values)
+        if not isinstance(want_args, dict) or not isinstance(args, dict):
+            return 0.0
+        
+        # Check that all expected arguments are present with equivalent values
+        for key, expected_value in want_args.items():
+            if key not in args:
+                return 0.0
+            
+            # For simple values, use direct comparison
+            # For complex values, could use AST parsing for deeper equivalence
+            if str(args[key]) != str(expected_value):
+                return 0.0
+        
+        return 1.0
+        
+    except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
+        return 0.0
 
 
 def _multiturn_state_goal(prompt: Messages, completion: Messages, answer: str, state: dict, info: dict, **kwargs) -> float:
@@ -215,8 +302,14 @@ def _multiturn_sequence_match(prompt: Messages, completion: Messages, answer: st
 
 
 class BFCLV3SingleTurnRubric(Rubric):
-    def __init__(self):
-        super().__init__(funcs=[_single_turn_exec_match], weights=[1.0], parser=Parser())
+    def __init__(self, score_mode: Literal["exec", "ast"] = "exec"):
+        if score_mode == "exec":
+            funcs = [_single_turn_exec_match]
+        elif score_mode == "ast":
+            funcs = [_single_turn_ast_match]
+        else:
+            raise ValueError(f"Unsupported score_mode: {score_mode}")
+        super().__init__(funcs=funcs, weights=[1.0], parser=Parser())
 
 
 class BFCLV3MultiTurnRubric(Rubric):
@@ -224,11 +317,18 @@ class BFCLV3MultiTurnRubric(Rubric):
         super().__init__(funcs=[_multiturn_state_goal, _multiturn_sequence_match], weights=[1.0, 0.5], parser=Parser())
 
 
+def load_bfcl_v3(path: str | Path) -> Dataset:
+    """Load BFCL v3 dataset from JSONL file."""
+    items = _read_jsonl(path)
+    return _to_dataset_v3(items)
+
+
 def load_environment(
     version: Literal["v3"] = "v3",
     mode: Literal["multi", "single"] = "multi",
     dataset_file: str | None = None,
     dataset: Dataset | None = None,
+    score_mode: Literal["exec", "ast"] = "exec",
     **kwargs: Any,
 ):
     ds = dataset
@@ -238,5 +338,5 @@ def load_environment(
     if mode == "multi":
         return BFCLV3Env(dataset=ds, **kwargs)
     if mode == "single":
-        return BFCLV3SingleTurnEnv(dataset=ds, **kwargs)
+        return BFCLV3SingleTurnEnv(dataset=ds, score_mode=score_mode, **kwargs)
     raise ValueError(f"Unsupported v3 mode: {mode}")

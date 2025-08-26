@@ -63,8 +63,18 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
         else:
             q = it.get("question") or ""
             prompts.append([{"role": "user", "content": q}])
-        answers.append(it.get("answer", ""))
-        info = dict(it.get("info", {}))
+
+        answer = it.get("answer", "")
+        if isinstance(answer, list) and len(answer) > 0:
+            answer = answer[0]
+        answers.append(answer)
+
+        info = it.get("info", {})
+        if isinstance(info, list) and len(info) > 0:
+            info = info[0]
+        elif isinstance(info, list):
+            info = {}
+        info = dict(info)
         if "sources" in it:
             info["sources"] = it["sources"]
         if "gold_urls" in it:
@@ -72,11 +82,23 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
         if "evidence" in it:
             info["evidence"] = it["evidence"]
         infos.append(info)
+    
     return Dataset.from_dict({"prompt": prompts, "answer": answers, "info": infos})
 
 
 def _normalize_answer(s: str) -> str:
     import unicodedata
+    
+    def remove_diacritics(text: str) -> str:
+        # Normalize to NFD (decomposed form) first
+        text = unicodedata.normalize("NFD", text)
+        # Remove combining diacritical marks
+        text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+        # Normalize back to NFC
+        return unicodedata.normalize("NFC", text)
+    
+    # Remove diacritics first
+    s = remove_diacritics(s)
     
     # Unicode normalization (NFKC) - compatibility decomposition followed by canonical composition
     s = unicodedata.normalize("NFKC", s)
@@ -84,8 +106,8 @@ def _normalize_answer(s: str) -> str:
     # Convert to lowercase
     s = s.lower()
     
-    # Remove punctuation and special characters
-    s = re.sub(r"[\,\.\/\-\_\*\^\(\)\[\]\{\}\:\;\!\?\>\<\@\#\$\%\^\&\+\=\~\`\'\"\|\\]", "", s)
+    # Remove punctuation and special characters (including em dash and other Unicode punctuation)
+    s = re.sub(r"[\,\.\/\-\_\*\^\(\)\[\]\{\}\:\;\!\?\>\<\@\#\$\%\^\&\+\=\~\`\'\"\|\\—–]", "", s)
     
     # Normalize whitespace - replace multiple spaces with single space and strip
     s = re.sub(r"\s+", " ", s)
@@ -121,10 +143,19 @@ class _Cache:
         if self.root:
             self.root.mkdir(parents=True, exist_ok=True)
 
+    def _sanitize_filename(self, name: str) -> str:
+        # Replace characters that are problematic in file paths
+        # Replace slashes and colons with underscores
+        sanitized = name.replace('/', '_').replace(':', '_')
+        # Replace other problematic characters
+        sanitized = sanitized.replace('\\', '_').replace('?', '_').replace('*', '_')
+        return sanitized
+
     def _p(self, name: str) -> Optional[Path]:
         if not self.root:
             return None
-        return self.root / name
+        sanitized_name = self._sanitize_filename(name)
+        return self.root / sanitized_name
 
     def get_json(self, name: str) -> Optional[Any]:
         p = self._p(name)
@@ -208,8 +239,22 @@ def _is_allowed_url(url: str) -> bool:
             if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
                 return False
         except ValueError:
-            # not an IP; allow
-            pass
+            # not an IP; perform DNS resolution to check for rebind attacks
+            try:
+                import socket
+                # Resolve hostname to IP addresses
+                addr_info = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+                for family, _, _, _, sockaddr in addr_info:
+                    ip = sockaddr[0] if isinstance(sockaddr, tuple) else sockaddr
+                    try:
+                        ip_obj = ipaddress.ip_address(ip)
+                        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved or ip_obj.is_link_local or ip_obj.is_multicast:
+                            return False
+                    except ValueError:
+                        continue
+            except Exception:
+                # If DNS resolution fails, be conservative and block
+                return False
         return True
     except Exception:
         return False
@@ -220,6 +265,7 @@ class Fetcher:
     timeout_s: float
     max_retries: int
     live: bool
+    max_redirects: int = 3
 
     def fetch(self, url: str, mode: Literal["raw", "markdown", "truncate"] = "raw") -> str:
         if not _is_allowed_url(url):
@@ -227,13 +273,44 @@ class Fetcher:
         if not self.live or httpx is None:
             body = f"Content fetched from {url}\n"
             return self._postprocess(body, mode)
+        
+        # Handle redirects manually with security checks
+        current_url = url
+        redirect_count = 0
+        
         delay = 0.2
         for attempt in range(self.max_retries + 1):
             try:
                 with httpx.Client(timeout=self.timeout_s, follow_redirects=False) as client:  # type: ignore
-                    resp = client.get(url)
+                    resp = client.get(current_url)
+                    
+                    # Handle redirect
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        redirect_count += 1
+                        if redirect_count > self.max_redirects:
+                            return "ERROR: too many redirects"
+                        
+                        # Get redirect location
+                        location = resp.headers.get("location")
+                        if not location:
+                            return "ERROR: redirect with no Location header"
+                        
+                        # Handle relative redirects
+                        if location.startswith("/"):
+                            from urllib.parse import urlparse
+                            parsed = urlparse(current_url)
+                            location = f"{parsed.scheme}://{parsed.netloc}{location}"
+                        
+                        # Security check on redirect target
+                        if not _is_allowed_url(location):
+                            return "ERROR: redirect to disallowed URL"
+                        
+                        current_url = location
+                        continue  # Try again with the new URL
+                    
                     if resp.status_code != 200:
                         raise RuntimeError(f"HTTP {resp.status_code}")
+                    
                     text = resp.text
                     return self._postprocess(text, mode)
             except Exception:
@@ -396,6 +473,8 @@ class BFCLV4SingleTurnEnv(ToolEnv):
             rubric=BFCLV4Rubric(),
             **kwargs,
         )
+        # Force max_turns to 1 for single-turn environment
+        self.max_turns = 1
 
 
 def _inject_oracle(ds: Dataset) -> Dataset:
@@ -404,12 +483,28 @@ def _inject_oracle(ds: Dataset) -> Dataset:
         if not ev:
             return prompt
         sys_msg = {"role": "system", "content": f"### Evidence (oracle)\n{ev}"}
-        return [sys_msg] + prompt
+        # Handle the case where prompt might be nested
+        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], list):
+            # prompt is a list containing a list, flatten it
+            return [sys_msg] + prompt[0]
+        else:
+            # prompt is already a list of dicts
+            return [sys_msg] + prompt
 
     prompts = []
+    answers = []
+    infos = []
     for i in range(len(ds)):
-        prompts.append(add_evidence(ds[i]["prompt"], ds[i]["info"]))
-    return Dataset.from_dict({"prompt": prompts, "answer": ds["answer"], "info": ds["info"]})
+        prompt = add_evidence(ds[i]["prompt"], ds[i]["info"])
+        # Ensure prompt is always a list of dicts
+        if isinstance(prompt, list):
+            prompts.append(prompt)
+        else:
+            prompts.append([prompt])
+        answers.append(ds[i]["answer"])
+        infos.append(ds[i]["info"])
+    
+    return Dataset.from_dict({"prompt": prompts, "answer": answers, "info": infos})
 
 
 class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
@@ -430,6 +525,14 @@ class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
             max_turns=1,
             **kwargs,
         )
+        # Force max_turns to 1 for single-turn environment
+        self.max_turns = 1
+
+
+def load_bfcl_v4(path: str | Path) -> Dataset:
+    """Load BFCL v4 dataset from JSONL file."""
+    items = _read_jsonl(path)
+    return _to_dataset_v4(items)
 
 
 def load_environment(
