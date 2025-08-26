@@ -46,4 +46,4 @@ def test_v4_single_turn_variants_construct():
     env1 = BFCLV4SingleTurnEnv(dataset=ds, fetch_fail_rate=0.0)
     assert env1.max_turns == 1
     env2 = BFCLV4OracleSingleTurnEnv(dataset=ds)
-    assert env2.max_turns == 10  # SingleTurnEnv default
+    assert env2.max_turns == 1  # Oracle single-turn should be 1
