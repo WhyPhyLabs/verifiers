@@ -76,9 +76,21 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
 
 
 def _normalize_answer(s: str) -> str:
+    import unicodedata
+    
+    # Unicode normalization (NFKC) - compatibility decomposition followed by canonical composition
+    s = unicodedata.normalize("NFKC", s)
+    
+    # Convert to lowercase
     s = s.lower()
-    s = re.sub(r"[\,\.\/\-\_\*\^\(\)]", "", s)
+    
+    # Remove punctuation and special characters
+    s = re.sub(r"[\,\.\/\-\_\*\^\(\)\[\]\{\}\:\;\!\?\>\<\@\#\$\%\^\&\+\=\~\`\'\"\|\\]", "", s)
+    
+    # Normalize whitespace - replace multiple spaces with single space and strip
+    s = re.sub(r"\s+", " ", s)
     s = s.strip()
+    
     return s
 
 
@@ -310,6 +322,23 @@ class BFCLV4WebEnv(ToolEnv):
         max_retries: int = 2,
         **kwargs: Any,
     ):
+        # Guard for live mode dependencies
+        if live:
+            missing_deps = []
+            if httpx is None:
+                missing_deps.append("httpx")
+            if DDGS is None:
+                missing_deps.append("duckduckgo-search")
+            if BeautifulSoup is None:
+                missing_deps.append("beautifulsoup4")
+            
+            if missing_deps:
+                raise ImportError(
+                    f"Live mode requires additional dependencies. Please install with: "
+                    f"pip install 'verifiers[bfcl]'\n"
+                    f"Missing dependencies: {', '.join(missing_deps)}"
+                )
+        
         cfg = V4Config(
             include_snippets=include_snippets,
             fetch_fail_rate=fetch_fail_rate,

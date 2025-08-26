@@ -94,6 +94,12 @@ envs = [
     "brave-search",
 ]
 
+bfcl = [
+    "httpx",
+    "duckduckgo-search",
+    "beautifulsoup4",
+]
+
 
 [project.scripts]
 vf-eval = "verifiers.scripts.eval:main"
