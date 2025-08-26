@@ -5,10 +5,12 @@
   - Missing-Functions gating (attempted unknown tool + broader textual triggers)
   - State recorded in `state.kv` and tool sequence in `state.tool_names`
   - Rubric (multi-turn): BFCLV3MultiTurnRubric
-    - `_multiturn_state_goal`: checks `info.final_state` against `state.kv`
-    - `_multiturn_sequence_match`: checks `info.tool_sequence` prefix vs `state.tool_names`
+    - `_multiturn_state_goal`: checks `info.final_state` against `state.kv` (weight: 0.7)
+    - `_multiturn_sequence_match`: checks `info.tool_sequence` prefix vs `state.tool_names` (weight: 0.3)
+    - **Note**: Multi-turn scoring combines state goal achievement (70%) and tool sequence prefix matching (30%)
 - Single-turn: BFCLV3SingleTurnEnv (ToolEnv, max_turns=1)
   - Rubric (single-turn): BFCLV3SingleTurnRubric (exec-equivalence via `info.expected.output`)
+  - **Note**: Single-turn scoring follows Tool-N1's binary functional-correctness approach, comparing tool output against expected results
 
 ## v4
 - Tools: `duckduckgo_search(keywords, max_results=10, region)` and `fetch_url_content(url, mode)`
@@ -22,6 +24,11 @@
   - B1: BFCLV4SingleTurnEnv (ToolEnv, max_turns=1)
   - B2: BFCLV4OracleSingleTurnEnv (SingleTurnEnv, max_turns=1) with optional oracle evidence injection (`info.evidence`)
 - Rubric: BFCLV4Rubric (normalized exact-match over strict JSON `{"answer": ...}`)
+  - **Note**: v4 grading uses only the `answer` field from the JSON response, matching the BFCL v4 specification's metric. Context and other fields are ignored.
+  - **Normalization**: Includes Unicode NFKC normalization, whitespace trimming, diacritic removal, and dash normalization for robust matching.
+  - **Score Modes**: 
+    - `"exec"` (default): Execution-equivalence scoring for functional correctness
+    - `"ast"`: AST-based scoring for leaderboard parity with some BFCL evaluations
 
 ## Security & Determinism
 - URL allowlist: only http/https; block private/reserved IPs
@@ -55,6 +62,10 @@ pip install 'verifiers[bfcl]'
 git clone https://github.com/WhyPhyLabs/verifiers
 cd verifiers
 pip install -e '.[bfcl]'
+
+# Install the BFCL environment module
+cd environments/vf_bfcl
+pip install -e .
 ```
 
 #### v3 Multi-Turn Mode
