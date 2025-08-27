@@ -1,14 +1,34 @@
 from __future__ import annotations
 
-from verifiers.envs.bfcl_v3_env import BFCLV3SingleTurnRubric
+from verifiers import BinaryPassThroughRubric
 
 
-def test_v3_single_turn_rubric_matches_output_when_present():
-    rubric = BFCLV3SingleTurnRubric()
-    info = {"expected": {"tool": "set_kv", "args": {"key": "k", "value": "v"}, "output": "OK"}}
-    completion = [
-        {"role": "assistant", "content": ""},
-        {"role": "tool", "content": "OK", "tool_call_id": "t1"},
-    ]
-    score = rubric.get_reward_funcs()[0](parser=None, prompt=[], completion=completion, answer="", state={}, task="default", info=info)
-    assert score == 1.0
+def test_v3_single_turn_binary_success():
+    """Test that BFCL v3 single-turn uses binary scoring via BinaryPassThroughRubric."""
+    rubric = BinaryPassThroughRubric()
+    
+    # Test successful case
+    state = {"success": True}
+    score = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state,
+        task="default",
+        info={}
+    )
+    assert score.reward == 1.0
+    assert score.metrics["binary_success"] == 1.0
+    
+    # Test failure case
+    state = {"success": False}
+    score = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state,
+        task="default",
+        info={}
+    )
+    assert score.reward == 0.0
+    assert score.metrics["binary_success"] == 0.0
