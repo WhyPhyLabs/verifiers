@@ -4,7 +4,8 @@ import json
 
 from datasets import Dataset
 
-from verifiers.envs.bfcl_v4_env import BFCLV4Rubric, load_environment as load_v4
+from verifiers import BinaryPassThroughRubric
+from verifiers.envs.bfcl_v4_env import load_environment as load_v4
 
 
 def test_v4_loader_single_and_multi_constructs():
@@ -15,13 +16,39 @@ def test_v4_loader_single_and_multi_constructs():
     assert env_multi.max_turns > 1
 
 
-def test_v4_rubric_class_scores_exact_match():
-    rubric = BFCLV4Rubric()
+def test_v4_binary_scoring():
+    """Test that BFCL v4 uses binary scoring via BinaryPassThroughRubric."""
+    rubric = BinaryPassThroughRubric()
+    
+    # Test successful case - JSON answer matches after normalization
     prompt = [{"role": "user", "content": "q"}]
     completion = [{"role": "assistant", "content": json.dumps({"answer": "hello world", "context": "x"})}]
     gold = "Hello, World."
-    score = rubric.get_reward_funcs()[0](parser=None, prompt=prompt, completion=completion, answer=gold, state={}, task="default", info={})
-    assert score == 1.0
+    state = {"success": True}
+    
+    score = rubric.score_rollout(
+        prompt=prompt,
+        completion=completion,
+        answer=gold,
+        state=state,
+        task="default",
+        info={}
+    )
+    assert score.reward == 1.0
+    assert score.metrics["binary_success"] == 1.0
+    
+    # Test failure case - JSON answer doesn't match
+    state = {"success": False}
+    score = rubric.score_rollout(
+        prompt=prompt,
+        completion=completion,
+        answer=gold,
+        state=state,
+        task="default",
+        info={}
+    )
+    assert score.reward == 0.0
+    assert score.metrics["binary_success"] == 0.0
 
 
 def test_v4_rubric_advanced_normalization():

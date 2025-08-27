@@ -215,3 +215,68 @@ class Rubric:
                 k: [item.metrics[k] for item in rewards] for k in rewards[0].metrics
             },
         )
+
+
+class BinaryPassThroughRubric(Rubric):
+    """
+    A degenerate rubric that simply returns 1.0 if env.success is True, else 0.0.
+    
+    This rubric is used for environments that determine success/failure internally
+    and need to provide a binary score to the framework without any additional
+    scoring logic or weights.
+    """
+    
+    def __init__(self, **kwargs):
+        # Initialize with no reward functions - we'll handle scoring in score_rollout
+        super().__init__(funcs=[], weights=[], **kwargs)
+    
+    async def score_rollout(
+        self,
+        prompt: Messages,
+        completion: Messages,
+        answer: str,
+        state: State,
+        task: str = "default",
+        info: Info | None = None,
+        **kwargs,
+    ) -> RolloutScore:
+        """
+        Return 1.0 if env.success is True, else 0.0.
+        
+        The environment should set the 'success' key in the state dictionary
+        to indicate whether the rollout was successful.
+        """
+        success = state.get("success", False)
+        reward = 1.0 if success else 0.0
+        
+        return RolloutScore(
+            metrics={"binary_success": reward},
+            reward=reward,
+        )
+    
+    async def score_rollouts(
+        self,
+        prompts: list[Messages],
+        completions: list[Messages],
+        answers: list[str],
+        states: list[State],
+        tasks: list[str],
+        infos: list[Info],
+        **kwargs,
+    ) -> RolloutScores:
+        """
+        Return binary scores for all rollouts based on env.success.
+        """
+        rewards = []
+        metrics = {"binary_success": []}
+        
+        for state in states:
+            success = state.get("success", False)
+            reward = 1.0 if success else 0.0
+            rewards.append(reward)
+            metrics["binary_success"].append(reward)
+        
+        return RolloutScores(
+            reward=rewards,
+            metrics=metrics,
+        )

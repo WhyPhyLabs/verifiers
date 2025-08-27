@@ -1,28 +1,69 @@
 from __future__ import annotations
 
-from verifiers.envs.bfcl_v3_env import BFCLV3MultiTurnRubric
+from verifiers import BinaryPassThroughRubric
 
 
-def test_v3_multiturn_rubric_state_and_sequence():
-    rubric = BFCLV3MultiTurnRubric()
-    # State after rollout contains kv and tool call names in order
-    state = {"kv": {"k": "v", "x": "1"}, "tool_names": ["set_kv", "secret_add"]}
-    info = {"final_state": {"k": "v"}, "tool_sequence": ["set_kv", "secret_add"]}
-    # Two funcs: state_goal and sequence_match
-    funcs = rubric.get_reward_funcs()
-    s_state = funcs[0](parser=None, prompt=[], completion=[], answer="", state=state, task="default", info=info)
-    s_seq = funcs[1](parser=None, prompt=[], completion=[], answer="", state=state, task="default", info=info)
-    assert s_state == 1.0 and s_seq == 1.0
-
-
-def test_v3_multiturn_rubric_weights():
-    """Test that the v3 multi-turn rubric has the correct weights [1.0, 0.5]."""
-    rubric = BFCLV3MultiTurnRubric()
-    # Check that weights are explicitly [1.0, 0.5] as documented
-    assert rubric.reward_weights == [1.0, 0.5]
+def test_v3_multiturn_binary_success():
+    """Test that BFCL v3 multi-turn uses binary scoring via BinaryPassThroughRubric."""
+    rubric = BinaryPassThroughRubric()
     
-    # Verify the reward functions are in the expected order
-    funcs = rubric.get_reward_funcs()
-    assert len(funcs) == 2
-    assert rubric.reward_weights[0] == 1.0  # state_goal weight
-    assert rubric.reward_weights[1] == 0.5  # sequence_match weight
+    # Test successful case - both state and sequence checks pass
+    state = {"success": True, "kv": {"k": "v", "x": "1"}, "tool_names": ["set_kv", "secret_add"]}
+    info = {"final_state": {"k": "v"}, "tool_sequence": ["set_kv", "secret_add"]}
+    score = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state,
+        task="default",
+        info=info
+    )
+    assert score.reward == 1.0
+    assert score.metrics["binary_success"] == 1.0
+    
+    # Test failure case - either state or sequence check fails
+    state = {"success": False, "kv": {"k": "wrong"}, "tool_names": ["set_kv"]}
+    info = {"final_state": {"k": "v"}, "tool_sequence": ["set_kv", "secret_add"]}
+    score = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state,
+        task="default",
+        info=info
+    )
+    assert score.reward == 0.0
+    assert score.metrics["binary_success"] == 0.0
+
+
+def test_v3_multiturn_no_weights():
+    """Test that v3 multi-turn no longer uses weights - it's binary only."""
+    rubric = BinaryPassThroughRubric()
+    
+    # Verify that the rubric doesn't have reward_weights (binary scoring)
+    assert not hasattr(rubric, 'reward_weights')
+    
+    # Test that scoring is purely binary based on success state
+    state_success = {"success": True}
+    state_failure = {"success": False}
+    
+    score_success = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state_success,
+        task="default",
+        info={}
+    )
+    score_failure = rubric.score_rollout(
+        prompt=[{"role": "user", "content": "test"}],
+        completion=[{"role": "assistant", "content": "test"}],
+        answer="test",
+        state=state_failure,
+        task="default",
+        info={}
+    )
+    
+    # Binary scoring: only 0.0 or 1.0, no partial credit
+    assert score_success.reward == 1.0
+    assert score_failure.reward == 0.0

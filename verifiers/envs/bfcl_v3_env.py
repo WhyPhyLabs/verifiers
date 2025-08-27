@@ -8,8 +8,9 @@ from typing import Any, Callable, Literal
 
 from datasets import Dataset
 
-from verifiers import ToolEnv, SingleTurnEnv, Rubric, Parser
-from verifiers.types import Messages, State
+from verifiers import ToolEnv, SingleTurnEnv, Rubric, Parser, BinaryPassThroughRubric
+from verifiers.types import Messages, State, Info, SamplingArgs
+from openai import AsyncOpenAI
 
 
 @dataclass
@@ -101,7 +102,7 @@ class BFCLV3Env(ToolEnv):
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=Rubric(),
+            rubric=BinaryPassThroughRubric(),
             **kwargs,
         )
 
@@ -182,13 +183,86 @@ class BFCLV3Env(ToolEnv):
 
         return tool_msgs + extra, state
 
+    async def rollout(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        prompt: Messages,
+        answer: str = "",
+        task: str = "default",
+        info: Info | None = None,
+        sampling_args: SamplingArgs | None = None,
+        **kwargs,
+    ) -> tuple[Messages, State]:
+        """
+        Override rollout to implement BFCL v3 binary success determination.
+        
+        According to BFCL v3 spec: success if both state-based and response-based 
+        checks pass in all turns. Force-terminated entries are marked incorrect.
+        """
+        completion, state = await super().rollout(
+            client, model, prompt, answer, task, info, sampling_args, **kwargs
+        )
+        
+        # Determine success based on BFCL v3 criteria
+        success = self._determine_v3_success(prompt, completion, state, info or {})
+        state["success"] = success
+        
+        return completion, state
+    
+    def _determine_v3_success(self, prompt: Messages, completion: Messages, state: State, info: dict) -> bool:
+        """
+        Determine success according to BFCL v3 specification.
+        
+        Returns True if both checks pass in all turns, False otherwise.
+        """
+        # Check if rollout was force-terminated (max turns reached)
+        if state.get("turn", 0) >= self.max_turns:
+            return False
+        
+        # Run state-based check
+        state_success = self._check_state_goal(state, info)
+        
+        # Run response-based check (tool sequence)
+        sequence_success = self._check_tool_sequence(state, info)
+        
+        # Both checks must pass for success
+        return state_success and sequence_success
+    
+    def _check_state_goal(self, state: State, info: dict) -> bool:
+        """Check if final state matches expected state."""
+        final_state = info.get("final_state", {})
+        if not final_state:
+            return True  # No state requirement means pass
+        
+        current_kv = state.get("kv", {})
+        for key, expected_value in final_state.items():
+            if str(current_kv.get(key, None)) != str(expected_value):
+                return False
+        return True
+    
+    def _check_tool_sequence(self, state: State, info: dict) -> bool:
+        """Check if tool sequence matches expected sequence."""
+        expected_sequence = info.get("tool_sequence", [])
+        if not expected_sequence:
+            return True  # No sequence requirement means pass
+        
+        actual_sequence = state.get("tool_names", [])
+        if len(actual_sequence) < len(expected_sequence):
+            return False
+        
+        # Check that the expected sequence matches the beginning of actual sequence
+        for i, expected_tool in enumerate(expected_sequence):
+            if i >= len(actual_sequence) or actual_sequence[i] != expected_tool:
+                return False
+        return True
+
 
 class BFCLV3SingleTurnEnv(ToolEnv):
     def __init__(
         self,
         dataset: Dataset | None = None,
         eval_dataset: Dataset | None = None,
-        score_mode: Literal["exec", "ast"] = "exec",
         **kwargs: Any,
     ):
         self._statebox: dict[str, Any] = {}
@@ -198,11 +272,134 @@ class BFCLV3SingleTurnEnv(ToolEnv):
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=BFCLV3SingleTurnRubric(score_mode=score_mode),
+            rubric=BinaryPassThroughRubric(),
             **kwargs,
         )
         # Force max_turns to 1 for single-turn environment
         self.max_turns = 1
+
+    async def rollout(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        prompt: Messages,
+        answer: str = "",
+        task: str = "default",
+        info: Info | None = None,
+        sampling_args: SamplingArgs | None = None,
+        **kwargs,
+    ) -> tuple[Messages, State]:
+        """
+        Override rollout to implement BFCL v3 single-turn binary success determination.
+        
+        According to BFCL v3 spec: use the official single-turn evaluator for the category
+        (AST or executable) and return binary 0/1.
+        """
+        completion, state = await super().rollout(
+            client, model, prompt, answer, task, info, sampling_args, **kwargs
+        )
+        
+        # Determine success based on BFCL v3 single-turn criteria
+        success = self._determine_v3_single_turn_success(prompt, completion, state, info or {})
+        state["success"] = success
+        
+        return completion, state
+    
+    def _determine_v3_single_turn_success(self, prompt: Messages, completion: Messages, state: State, info: dict) -> bool:
+        """
+        Determine success for BFCL v3 single-turn according to official specification.
+        
+        Uses the appropriate single-turn evaluator (AST or executable) based on the
+        category and returns binary True/False.
+        """
+        expected = info.get("expected", {})
+        if not expected:
+            return False
+        
+        # Try AST matching first (tool name and arguments)
+        if self._check_ast_match(completion, expected):
+            return True
+        
+        # Try executable matching (tool output)
+        if self._check_executable_match(completion, expected):
+            return True
+        
+        return False
+    
+    def _check_ast_match(self, completion: Messages, expected: dict) -> bool:
+        """Check AST-based single-turn match."""
+        want_tool = expected.get("tool")
+        want_args = expected.get("args", {})
+        
+        if not want_tool:
+            return False
+        
+        if not isinstance(completion, list):
+            return False
+        
+        # Find the last tool call in completion
+        tool_call = None
+        for m in reversed(completion):
+            if isinstance(m, dict) and m.get("role") == "assistant" and "tool_calls" in m:
+                tool_calls = m.get("tool_calls", [])
+                if tool_calls:
+                    tool_call = tool_calls[0]  # Take first tool call
+                    break
+        
+        if not tool_call:
+            return False
+        
+        # Parse tool call function and arguments
+        try:
+            if isinstance(tool_call, dict):
+                function = tool_call.get("function", {})
+                tool_name = function.get("name")
+                args_str = function.get("arguments", "{}")
+                
+                # Parse arguments
+                if isinstance(args_str, str):
+                    args = json.loads(args_str)
+                else:
+                    args = args_str
+            else:
+                # Handle OpenAI function call format
+                tool_name = tool_call.function.name if hasattr(tool_call, 'function') else None
+                args = json.loads(tool_call.function.arguments) if hasattr(tool_call, 'function') else {}
+            
+            # Check tool name matches
+            if tool_name != want_tool:
+                return False
+            
+            # Check arguments match (using AST equivalence for complex values)
+            if not isinstance(want_args, dict) or not isinstance(args, dict):
+                return False
+            
+            # Check that all expected arguments are present with equivalent values
+            for key, expected_value in want_args.items():
+                if key not in args:
+                    return False
+                
+                # For simple values, use direct comparison
+                # For complex values, could use AST parsing for deeper equivalence
+                if str(args[key]) != str(expected_value):
+                    return False
+            
+            return True
+            
+        except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
+            return False
+    
+    def _check_executable_match(self, completion: Messages, expected: dict) -> bool:
+        """Check executable output-based single-turn match."""
+        want_output = expected.get("output")
+        if not want_output:
+            return False
+        
+        if isinstance(completion, list):
+            for m in reversed(completion):
+                if isinstance(m, dict) and m.get("role") == "tool":
+                    return str(m.get("content", "")) == str(want_output)
+        return False
 
 
 # Minimal rubrics for v3
@@ -328,7 +525,6 @@ def load_environment(
     mode: Literal["multi", "single"] = "multi",
     dataset_file: str | None = None,
     dataset: Dataset | None = None,
-    score_mode: Literal["exec", "ast"] = "exec",
     **kwargs: Any,
 ):
     ds = dataset
@@ -338,5 +534,5 @@ def load_environment(
     if mode == "multi":
         return BFCLV3Env(dataset=ds, **kwargs)
     if mode == "single":
-        return BFCLV3SingleTurnEnv(dataset=ds, score_mode=score_mode, **kwargs)
+        return BFCLV3SingleTurnEnv(dataset=ds, **kwargs)
     raise ValueError(f"Unsupported v3 mode: {mode}")

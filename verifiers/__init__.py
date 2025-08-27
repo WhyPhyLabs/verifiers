@@ -34,7 +34,7 @@ from .parsers.parser import Parser
 from .parsers.think_parser import ThinkParser
 from .parsers.xml_parser import XMLParser
 from .rubrics.judge_rubric import JudgeRubric
-from .rubrics.rubric import Rubric
+from .rubrics.rubric import Rubric, BinaryPassThroughRubric
 from .rubrics.rubric_group import RubricGroup
 from .rubrics.tool_rubric import ToolRubric
 from .rubrics.terminalbench_rubric import TerminalBenchRubric
@@ -106,6 +106,7 @@ __all__ = [
     "ThinkParser",
     "XMLParser",
     "Rubric",
+    "BinaryPassThroughRubric",
     "JudgeRubric",
     "RubricGroup",
     "ToolRubric",

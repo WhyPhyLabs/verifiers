@@ -8,7 +8,6 @@ from verifiers.envs.bfcl_v4_env import (
     BFCLV4WebEnv,
     BFCLV4SingleTurnEnv,
     BFCLV4OracleSingleTurnEnv,
-    answer_exact_match,
 )
 
 
@@ -30,13 +29,24 @@ def test_v4_tools_failure_injection_deterministic(tmp_path):
     assert isinstance(tool_msg["content"], str) and tool_msg["content"].startswith("ERROR:")
 
 
-def test_v4_answer_exact_match_normalization():
+def test_v4_binary_scoring_normalization():
+    """Test that BFCL v4 binary scoring handles normalization correctly."""
+    from verifiers.envs.bfcl_v4_env import _normalize_answer
+    
+    # Test that normalization works correctly (this is used internally by the env)
     gold = "Hello, World."
-    completion = [{"role": "assistant", "content": json.dumps({"answer": "hello world", "context": "x"})}]
-    score = answer_exact_match(prompt=[{"role": "user", "content": "q"}], completion=completion, answer=gold)
-    assert score == 1.0
-    completion_bad = [{"role": "assistant", "content": '{"foo":"bar"}'}]
-    assert answer_exact_match([{"role": "user", "content": "q"}], completion_bad, gold) == 0.0
+    normalized_gold = _normalize_answer(gold)
+    assert normalized_gold == "hello world"
+    
+    # Test that the environment uses binary scoring
+    ds = Dataset.from_dict(
+        {"prompt": [[{"role": "user", "content": "q"}]], "answer": [gold], "info": [{}]}
+    )
+    env = BFCLV4SingleTurnEnv(dataset=ds)
+    
+    # The environment should use BinaryPassThroughRubric
+    assert hasattr(env, 'rubric')
+    assert env.rubric.__class__.__name__ == 'BinaryPassThroughRubric'
 
 
 def test_v4_single_turn_variants_construct():

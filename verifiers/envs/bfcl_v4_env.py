@@ -11,8 +11,9 @@ from typing import Any, Callable, Literal, Optional
 
 from datasets import Dataset
 
-from verifiers import ToolEnv, SingleTurnEnv, Rubric, Parser
-from verifiers.types import Messages
+from verifiers import ToolEnv, SingleTurnEnv, Rubric, Parser, BinaryPassThroughRubric
+from verifiers.types import Messages, Info, SamplingArgs
+from openai import AsyncOpenAI
 
 try:
     import httpx  # type: ignore
@@ -433,9 +434,62 @@ class BFCLV4WebEnv(ToolEnv):
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=BFCLV4Rubric(),
+            rubric=BinaryPassThroughRubric(),
             **kwargs,
         )
+
+    async def rollout(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        prompt: Messages,
+        answer: str = "",
+        task: str = "default",
+        info: Info | None = None,
+        sampling_args: SamplingArgs | None = None,
+        **kwargs,
+    ) -> tuple[Messages, State]:
+        """
+        Override rollout to implement BFCL v4 binary success determination.
+        
+        According to BFCL v4 spec: parse final JSON {"answer": ...} and apply
+        exact-match after normalization -> 0/1.
+        """
+        completion, state = await super().rollout(
+            client, model, prompt, answer, task, info, sampling_args, **kwargs
+        )
+        
+        # Determine success based on BFCL v4 criteria
+        success = self._determine_v4_success(prompt, completion, answer, state, info or {})
+        state["success"] = success
+        
+        return completion, state
+    
+    def _determine_v4_success(self, prompt: Messages, completion: Messages, answer: str, state: State, info: dict) -> bool:
+        """
+        Determine success according to BFCL v4 specification.
+        
+        Parse final message for strict JSON {"answer": ...}, apply normalization,
+        and check exact-match with ground truth.
+        """
+        if not isinstance(completion, list) or not completion:
+            return False
+        
+        last = completion[-1]
+        content = last.get("content", "")
+        
+        try:
+            obj = json.loads(content) if isinstance(content, str) else {}
+        except Exception:
+            return False
+        
+        if not isinstance(obj, dict) or "answer" not in obj:
+            return False
+        
+        pred = _normalize_answer(str(obj.get("answer", "")))
+        gold = _normalize_answer(str(answer))
+        
+        return pred == gold
 
 
 class BFCLV4SingleTurnEnv(ToolEnv):
@@ -470,7 +524,7 @@ class BFCLV4SingleTurnEnv(ToolEnv):
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=BFCLV4Rubric(),
+            rubric=BinaryPassThroughRubric(),
             **kwargs,
         )
         # Force max_turns to 1 for single-turn environment
@@ -521,12 +575,65 @@ class BFCLV4OracleSingleTurnEnv(SingleTurnEnv):
             dataset=dataset,
             eval_dataset=eval_dataset,
             parser=Parser(),
-            rubric=BFCLV4Rubric(),
+            rubric=BinaryPassThroughRubric(),
             max_turns=1,
             **kwargs,
         )
         # Force max_turns to 1 for single-turn environment
         self.max_turns = 1
+
+    async def rollout(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        prompt: Messages,
+        answer: str = "",
+        task: str = "default",
+        info: Info | None = None,
+        sampling_args: SamplingArgs | None = None,
+        **kwargs,
+    ) -> tuple[Messages, State]:
+        """
+        Override rollout to implement BFCL v4 single-turn binary success determination.
+        
+        According to BFCL v4 spec: parse final JSON {"answer": ...} and apply
+        exact-match after normalization -> 0/1.
+        """
+        completion, state = await super().rollout(
+            client, model, prompt, answer, task, info, sampling_args, **kwargs
+        )
+        
+        # Determine success based on BFCL v4 criteria
+        success = self._determine_v4_success(prompt, completion, answer, state, info or {})
+        state["success"] = success
+        
+        return completion, state
+    
+    def _determine_v4_success(self, prompt: Messages, completion: Messages, answer: str, state: State, info: dict) -> bool:
+        """
+        Determine success according to BFCL v4 specification.
+        
+        Parse final message for strict JSON {"answer": ...}, apply normalization,
+        and check exact-match with ground truth.
+        """
+        if not isinstance(completion, list) or not completion:
+            return False
+        
+        last = completion[-1]
+        content = last.get("content", "")
+        
+        try:
+            obj = json.loads(content) if isinstance(content, str) else {}
+        except Exception:
+            return False
+        
+        if not isinstance(obj, dict) or "answer" not in obj:
+            return False
+        
+        pred = _normalize_answer(str(obj.get("answer", "")))
+        gold = _normalize_answer(str(answer))
+        
+        return pred == gold
 
 
 def load_bfcl_v4(path: str | Path) -> Dataset:
