@@ -51,8 +51,8 @@ def test_v4_binary_scoring():
     assert score.metrics["binary_success"] == 0.0
 
 
-def test_v4_rubric_advanced_normalization():
-    """Test that the rubric handles Unicode, whitespace, and punctuation normalization correctly."""
+def test_v4_normalization():
+    """Test that BFCL v4 normalization works correctly (used internally by env)."""
     from verifiers.envs.bfcl_v4_env import _normalize_answer
     
     # Test Unicode normalization
