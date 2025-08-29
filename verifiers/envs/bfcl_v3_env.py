@@ -55,6 +55,9 @@ def _to_dataset_v3(items: list[dict]) -> Dataset:
             info["final_state"] = it["final_state"]
         if "tool_sequence" in it:
             info["tool_sequence"] = it["tool_sequence"]
+        # BFCL-exact per-turn specifications
+        if "turns" in it:
+            info["turns"] = it["turns"]
         infos.append(info)
     return Dataset.from_dict({"prompt": prompts, "info": infos})
 
@@ -123,6 +126,11 @@ class BFCLV3Env(ToolEnv):
         state["tool_stage"] = 0
         state["kv"] = self._statebox.setdefault("kv", {})
         state["tool_names"] = self._statebox.setdefault("tool_names", [])
+        
+        # Initialize per-turn tracking for BFCL-exact evaluation
+        state["turn_states"] = []  # List of state snapshots per turn
+        state["turn_tool_sequences"] = []  # List of tool sequences per turn
+        
         return state
 
     def _should_reveal_by_text(self, messages: Messages) -> bool:
@@ -174,7 +182,22 @@ class BFCLV3Env(ToolEnv):
 
         tool_msgs: list[dict] = []
         if isinstance(messages, list) and messages and "tool_calls" in messages[-1]:
+            # Capture state before tool execution for per-turn tracking
+            turn_start_state = dict(state.get("kv", {}))
+            turn_start_tools = list(state.get("tool_names", []))
+            
             tool_msgs, state = super().env_response(messages, state, **kwargs)
+            
+            # Capture state after tool execution for per-turn tracking
+            turn_end_state = dict(state.get("kv", {}))
+            turn_end_tools = list(state.get("tool_names", []))
+            
+            # Record per-turn information
+            state.setdefault("turn_states", []).append({
+                "start": turn_start_state,
+                "end": turn_end_state
+            })
+            state.setdefault("turn_tool_sequences", []).append(turn_end_tools[len(turn_start_tools):])
 
         if self._enable_missing and not self._revealed and self._should_reveal_by_text(messages):
             self._expose_withheld()
@@ -216,18 +239,19 @@ class BFCLV3Env(ToolEnv):
         
         Returns True if both checks pass in all turns, False otherwise.
         """
-        # Check if rollout was force-terminated (max turns reached)
-        if state.get("turn", 0) >= self.max_turns:
+        # Check if rollout was force-terminated (max turns exceeded)
+        # BFCL spec: force termination only if a single turn exceeds the step limit
+        if state.get("turn", 0) > self.max_turns:
             return False
         
-        # Run state-based check
-        state_success = self._check_state_goal(state, info)
-        
-        # Run response-based check (tool sequence)
-        sequence_success = self._check_tool_sequence(state, info)
-        
-        # Both checks must pass for success
-        return state_success and sequence_success
+        # Check if we have per-turn specifications (BFCL-exact mode)
+        if "turns" in info:
+            return self._check_per_turn_success(state, info)
+        else:
+            # Fallback to global checking for backward compatibility
+            state_success = self._check_state_goal(state, info)
+            sequence_success = self._check_tool_sequence(state, info)
+            return state_success and sequence_success
     
     def _check_state_goal(self, state: State, info: dict) -> bool:
         """Check if final state matches expected state."""
@@ -242,20 +266,83 @@ class BFCLV3Env(ToolEnv):
         return True
     
     def _check_tool_sequence(self, state: State, info: dict) -> bool:
-        """Check if tool sequence matches expected sequence."""
+        """Check if tool sequence matches expected sequence using ordered subsequence matching."""
         expected_sequence = info.get("tool_sequence", [])
         if not expected_sequence:
             return True  # No sequence requirement means pass
         
         actual_sequence = state.get("tool_names", [])
-        if len(actual_sequence) < len(expected_sequence):
+        
+        # Check if expected_sequence is an ordered subsequence of actual_sequence
+        # This allows redundant calls before, between, or after the minimal path
+        return self._is_ordered_subsequence(expected_sequence, actual_sequence)
+    
+    def _is_ordered_subsequence(self, expected: list[str], actual: list[str]) -> bool:
+        """Check if expected sequence is an ordered subsequence of actual sequence."""
+        if not expected:
+            return True
+        
+        # Use iterator to traverse actual sequence
+        it = iter(actual)
+        return all(any(tool == expected_tool for tool in it) for expected_tool in expected)
+    
+    def _check_per_turn_success(self, state: State, info: dict) -> bool:
+        """
+        Check success using per-turn specifications (BFCL-exact mode).
+        
+        Returns True if both state-based and response-based checks pass in ALL turns.
+        """
+        turns = info.get("turns", [])
+        turn_states = state.get("turn_states", [])
+        turn_tool_sequences = state.get("turn_tool_sequences", [])
+        
+        # If we don't have per-turn data, fall back to global checking
+        if not turns or not turn_states or not turn_tool_sequences:
+            return self._check_state_goal(state, info) and self._check_tool_sequence(state, info)
+        
+        # Ensure we have data for all turns
+        if len(turns) != len(turn_states) or len(turns) != len(turn_tool_sequences):
             return False
         
-        # Check that the expected sequence matches the beginning of actual sequence
-        for i, expected_tool in enumerate(expected_sequence):
-            if i >= len(actual_sequence) or actual_sequence[i] != expected_tool:
+        # Check each turn: both state and sequence must pass
+        for i, turn_spec in enumerate(turns):
+            # Check state-based success for this turn
+            if not self._check_turn_state_goal(turn_states[i], turn_spec):
                 return False
+            
+            # Check response-based success for this turn
+            if not self._check_turn_tool_sequence(turn_tool_sequences[i], turn_spec):
+                return False
+        
+        # All turns passed
         return True
+    
+    def _check_turn_state_goal(self, turn_state: dict, turn_spec: dict) -> bool:
+        """Check if turn state matches expected state for this turn."""
+        expected_final_state = turn_spec.get("final_state", {})
+        if not expected_final_state:
+            return True  # No state requirement means pass
+        
+        actual_final_state = turn_state.get("end", {})
+        
+        # Check that all expected keys match (excluding private keys starting with _)
+        for key, expected_value in expected_final_state.items():
+            if key.startswith("_"):
+                continue  # Skip private keys
+            
+            if str(actual_final_state.get(key, None)) != str(expected_value):
+                return False
+        
+        return True
+    
+    def _check_turn_tool_sequence(self, turn_tools: list[str], turn_spec: dict) -> bool:
+        """Check if turn tool sequence matches expected sequence for this turn."""
+        expected_tools = turn_spec.get("required_tools", [])
+        if not expected_tools:
+            return True  # No sequence requirement means pass
+        
+        # Check if expected_tools is an ordered subsequence of turn_tools
+        return self._is_ordered_subsequence(expected_tools, turn_tools)
 
 
 class BFCLV3SingleTurnEnv(ToolEnv):
