@@ -41,6 +41,7 @@ class V4Config:
     live: bool = False  # live web mode for search/fetch
     timeout_s: float = 8.0
     max_retries: int = 2
+    enforce_network_safety: bool = True  # BFCL parity: disable for exact BFCL behavior
 
 
 def _read_jsonl(path: str | Path) -> list[dict]:
@@ -88,31 +89,18 @@ def _to_dataset_v4(items: list[dict]) -> Dataset:
 
 
 def _normalize_answer(s: str) -> str:
-    import unicodedata
+    """
+    Normalize answer according to BFCL v4 specification.
     
-    def remove_diacritics(text: str) -> str:
-        # Normalize to NFD (decomposed form) first
-        text = unicodedata.normalize("NFD", text)
-        # Remove combining diacritical marks
-        text = "".join(c for c in text if unicodedata.category(c) != "Mn")
-        # Normalize back to NFC
-        return unicodedata.normalize("NFC", text)
+    BFCL v4 blog specifies: lowercase + punctuation stripping only.
+    Punctuation set: , . / - _ * ^ ( ) and quotes as mentioned in the blog.
+    """
+    # Convert to ASCII lowercase only (preserve Unicode characters)
+    s = re.sub(r'[A-Z]', lambda m: m.group().lower(), s)
     
-    # Remove diacritics first
-    s = remove_diacritics(s)
-    
-    # Unicode normalization (NFKC) - compatibility decomposition followed by canonical composition
-    s = unicodedata.normalize("NFKC", s)
-    
-    # Convert to lowercase
-    s = s.lower()
-    
-    # Remove punctuation and special characters (including em dash and other Unicode punctuation)
-    s = re.sub(r"[\,\.\/\-\_\*\^\(\)\[\]\{\}\:\;\!\?\>\<\@\#\$\%\^\&\+\=\~\`\'\"\|\\—–]", "", s)
-    
-    # Normalize whitespace - replace multiple spaces with single space and strip
-    s = re.sub(r"\s+", " ", s)
-    s = s.strip()
+    # Remove punctuation marks exactly as specified by BFCL v4
+    # Based on BFCL v4 blog: , . / - _ * ^ ( ) and quotes
+    s = re.sub(r"[,./\-_*^()'\"]", "", s)
     
     return s
 
@@ -227,7 +215,21 @@ class DDGSearchClient(SearchClient):
 _ALLOWED_SCHEMES = {"http", "https"}
 
 
-def _is_allowed_url(url: str) -> bool:
+def _is_allowed_url(url: str, enforce_network_safety: bool = True) -> bool:
+    """
+    Check if URL is allowed for fetching.
+    
+    Args:
+        url: The URL to check
+        enforce_network_safety: If False, bypass all safety checks for BFCL parity mode
+    
+    Returns:
+        True if URL is allowed, False otherwise
+    """
+    # If network safety is disabled, allow all URLs (BFCL parity mode)
+    if not enforce_network_safety:
+        return True
+    
     try:
         if not any(url.lower().startswith(s + "://") for s in _ALLOWED_SCHEMES):
             return False
@@ -267,9 +269,10 @@ class Fetcher:
     max_retries: int
     live: bool
     max_redirects: int = 3
+    enforce_network_safety: bool = True
 
     def fetch(self, url: str, mode: Literal["raw", "markdown", "truncate"] = "raw") -> str:
-        if not _is_allowed_url(url):
+        if not _is_allowed_url(url, self.enforce_network_safety):
             return "ERROR: URL not allowed"
         if not self.live or httpx is None:
             body = f"Content fetched from {url}\n"
@@ -303,7 +306,7 @@ class Fetcher:
                             location = f"{parsed.scheme}://{parsed.netloc}{location}"
                         
                         # Security check on redirect target
-                        if not _is_allowed_url(location):
+                        if not _is_allowed_url(location, self.enforce_network_safety):
                             return "ERROR: redirect to disallowed URL"
                         
                         current_url = location
@@ -340,7 +343,7 @@ def _mk_v4_tools(cfg: V4Config, search_client: Optional[SearchClient] = None) ->
     cache = _Cache(cfg.offline_cache_dir)
     rng = random.Random(cfg.failure_seed)
     search_client = search_client or (DDGSearchClient(cfg.include_snippets) if cfg.live else MockSearchClient(cfg.include_snippets))
-    fetcher = Fetcher(timeout_s=cfg.timeout_s, max_retries=cfg.max_retries, live=cfg.live)
+    fetcher = Fetcher(timeout_s=cfg.timeout_s, max_retries=cfg.max_retries, live=cfg.live, enforce_network_safety=cfg.enforce_network_safety)
 
     def duckduckgo_search(keywords: str, max_results: int = 10, region: str = "wt-wt") -> list[dict]:
         key = f"search::{region}::{max_results}::{keywords}"
@@ -398,6 +401,7 @@ class BFCLV4WebEnv(ToolEnv):
         search_client: Optional[SearchClient] = None,
         timeout_s: float = 8.0,
         max_retries: int = 2,
+        enforce_network_safety: bool = True,
         **kwargs: Any,
     ):
         # Guard for live mode dependencies
@@ -426,6 +430,7 @@ class BFCLV4WebEnv(ToolEnv):
             live=live,
             timeout_s=timeout_s,
             max_retries=max_retries,
+            enforce_network_safety=enforce_network_safety,
         )
         tools = _mk_v4_tools(cfg, search_client=search_client)
         super().__init__(
@@ -505,6 +510,7 @@ class BFCLV4SingleTurnEnv(ToolEnv):
         search_client: Optional[SearchClient] = None,
         timeout_s: float = 8.0,
         max_retries: int = 2,
+        enforce_network_safety: bool = True,
         **kwargs: Any,
     ):
         cfg = V4Config(
@@ -516,6 +522,7 @@ class BFCLV4SingleTurnEnv(ToolEnv):
             live=live,
             timeout_s=timeout_s,
             max_retries=max_retries,
+            enforce_network_safety=enforce_network_safety,
         )
         tools = _mk_v4_tools(cfg, search_client=search_client)
         super().__init__(
@@ -529,6 +536,32 @@ class BFCLV4SingleTurnEnv(ToolEnv):
         )
         # Force max_turns to 1 for single-turn environment
         self.max_turns = 1
+
+    def _determine_v4_success(self, prompt: Messages, completion: Messages, answer: str, state: State, info: dict) -> bool:
+        """
+        Determine success according to BFCL v4 specification.
+        
+        Parse final message for strict JSON {"answer": ...}, apply normalization,
+        and check exact-match with ground truth.
+        """
+        if not isinstance(completion, list) or not completion:
+            return False
+        
+        last = completion[-1]
+        content = last.get("content", "")
+        
+        try:
+            obj = json.loads(content) if isinstance(content, str) else {}
+        except Exception:
+            return False
+        
+        if not isinstance(obj, dict) or "answer" not in obj:
+            return False
+        
+        pred = _normalize_answer(str(obj.get("answer", "")))
+        gold = _normalize_answer(str(answer))
+        
+        return pred == gold
 
 
 def _inject_oracle(ds: Dataset) -> Dataset:

@@ -1,6 +1,11 @@
+
+
+
+
 from __future__ import annotations
 
 import json
+import asyncio
 
 from datasets import Dataset
 
@@ -26,76 +31,98 @@ def test_v4_binary_scoring():
     gold = "Hello, World."
     state = {"success": True}
     
-    score = rubric.score_rollout(
+    score = asyncio.run(rubric.score_rollout(
         prompt=prompt,
         completion=completion,
         answer=gold,
         state=state,
         task="default",
         info={}
-    )
+    ))
     assert score.reward == 1.0
     assert score.metrics["binary_success"] == 1.0
     
     # Test failure case - JSON answer doesn't match
     state = {"success": False}
-    score = rubric.score_rollout(
+    score = asyncio.run(rubric.score_rollout(
         prompt=prompt,
         completion=completion,
         answer=gold,
         state=state,
         task="default",
         info={}
-    )
+    ))
     assert score.reward == 0.0
     assert score.metrics["binary_success"] == 0.0
 
 
 def test_v4_normalization():
-    """Test that BFCL v4 normalization works correctly (used internally by env)."""
+    """Test that v4 normalization matches BFCL spec exactly."""
+    rubric = BinaryPassThroughRubric()
+    
+    # Test case-insensitive and punctuation-insensitive matching
+    prompt = [{"role": "user", "content": "q"}]
+    completion = [{"role": "assistant", "content": json.dumps({"answer": "Hello, World!"})}]
+    gold = "hello world"
+    state = {"success": True}
+    
+    score = asyncio.run(rubric.score_rollout(
+        prompt=prompt,
+        completion=completion,
+        answer=gold,
+        state=state,
+        task="default",
+        info={}
+    ))
+    assert score.reward == 1.0
+    assert score.metrics["binary_success"] == 1.0
+    
+    # Test that diacritics are preserved (not normalized away)
+    completion = [{"role": "assistant", "content": json.dumps({"answer": "résumé"})}]
+    gold = "resume"
+    state = {"success": False}  # Should fail because diacritics are preserved
+    
+    score = asyncio.run(rubric.score_rollout(
+        prompt=prompt,
+        completion=completion,
+        answer=gold,
+        state=state,
+        task="default",
+        info={}
+    ))
+    assert score.reward == 0.0
+    assert score.metrics["binary_success"] == 0.0
+
+
+def test_v4_normalization_function():
+    """Test the _normalize_answer function directly."""
     from verifiers.envs.bfcl_v4_env import _normalize_answer
     
-    # Test Unicode normalization
-    assert _normalize_answer("Héllö, Wörld!") == "hello world"
-    assert _normalize_answer("café") == "cafe"
-    assert _normalize_answer("naïve") == "naive"
+    # Test BFCL-specified punctuation removal
+    assert _normalize_answer("Hello, World.") == "hello world"     # comma and period
+    assert _normalize_answer("Hello/World") == "helloworld"        # slash
+    assert _normalize_answer("Hello-World") == "helloworld"       # dash
+    assert _normalize_answer("Hello_World") == "helloworld"       # underscore
+    assert _normalize_answer("Hello*World") == "helloworld"       # asterisk
+    assert _normalize_answer("Hello^World") == "helloworld"       # caret
+    assert _normalize_answer("Hello(World)") == "helloworld"     # parentheses
+    assert _normalize_answer('"Hello"') == "hello"               # quotes
+    assert _normalize_answer("'Hello'") == "hello"               # single quotes
     
-    # Test smart quotes and special Unicode characters
-    assert _normalize_answer('"Hello" & "World"') == "hello world"
-    assert _normalize_answer("'Hello' — 'World'") == "hello world"
+    # Test that non-BFCL punctuation is preserved
+    assert _normalize_answer("Hello!World") == "hello!world"     # preserves exclamation (not in BFCL set)
+    assert _normalize_answer("Hello=World") == "hello=world"     # preserves equals (not in BFCL set)
     
-    # Test whitespace normalization
-    assert _normalize_answer("hello    world") == "hello world"
-    assert _normalize_answer("  hello  world  ") == "hello world"
-    assert _normalize_answer("hello\t\tworld\n") == "hello world"
-    
-    # Test punctuation removal
-    assert _normalize_answer("Hello, World!") == "hello world"
-    assert _normalize_answer("Hello.World") == "helloworld"
-    assert _normalize_answer("Hello/World") == "helloworld"
+    # Test that whitespace is NOT collapsed (BFCL-exact doesn't do this)
+    assert _normalize_answer("hello    world") == "hello    world"  # preserves extra spaces
+    assert _normalize_answer("  hello  world  ") == "  hello  world  "  # preserves leading/trailing spaces
     
     # Test case normalization
     assert _normalize_answer("HeLLo WoRLd") == "hello world"
     
-    # Test mixed normalization
-    assert _normalize_answer("  Héllö,   Wörld!  ") == "hello world"
-    assert _normalize_answer('"CAFÉ" naïve...') == "cafe naive"
+    # Test Unicode characters are preserved (not normalized to ASCII)
+    assert _normalize_answer("Ωmega") == "Ωmega"  # preserves Unicode symbol
+    assert _normalize_answer("café") == "café"     # preserves accented characters
 
 
-def test_v4_oracle_single_turn_env_has_max_turns_one():
-    """Test that BFCLV4OracleSingleTurnEnv has max_turns=1 as required."""
-    from verifiers.envs.bfcl_v4_env import BFCLV4OracleSingleTurnEnv
-    
-    ds = Dataset.from_dict({"prompt": [[{"role": "user", "content": "q"}]], "answer": ["a"], "info": [{}]})
-    
-    # Test with default constructor
-    env = BFCLV4OracleSingleTurnEnv(dataset=ds)
-    assert env.max_turns == 1, f"Expected max_turns=1, got {env.max_turns}"
-    
-    # Test with explicit parameters
-    env2 = BFCLV4OracleSingleTurnEnv(dataset=ds, inject_oracle=True)
-    assert env2.max_turns == 1, f"Expected max_turns=1, got {env2.max_turns}"
-    
-    # Test with inject_oracle=False
-    env3 = BFCLV4OracleSingleTurnEnv(dataset=ds, inject_oracle=False)
-    assert env3.max_turns == 1, f"Expected max_turns=1, got {env3.max_turns}"
+

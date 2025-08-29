@@ -4,13 +4,17 @@
 - Multi-turn: BFCLV3Env (ToolEnv)
   - Missing-Functions gating (attempted unknown tool + broader textual triggers)
   - State recorded in `state.kv` and tool sequence in `state.tool_names`
-  - Rubric (multi-turn): BFCLV3MultiTurnRubric
-    - `_multiturn_state_goal`: checks `info.final_state` against `state.kv` (weight: 0.7)
-    - `_multiturn_sequence_match`: checks `info.tool_sequence` prefix vs `state.tool_names` (weight: 0.3)
-    - **Note**: Multi-turn scoring combines state goal achievement (70%) and tool sequence prefix matching (30%)
+  - Rubric (multi-turn): BinaryPassThroughRubric
+    - State-based check: verifies `info.final_state` against `state.kv`
+    - Response-based check: verifies `info.tool_sequence` as ordered subsequence in `state.tool_names`
+    - **Note**: Multi-turn scoring requires both checks to pass in all turns (BFCL-exact mode supports per-turn evaluation via `info.turns`)
+  - **BFCL-Exact Features**:
+    - Ordered subsequence matching (allows redundant calls before/between/after minimal path)
+    - Termination only when turns exceed limit (not when equal to limit)
+    - Per-turn evaluation support with AND across turns
 - Single-turn: BFCLV3SingleTurnEnv (ToolEnv, max_turns=1)
-  - Rubric (single-turn): BFCLV3SingleTurnRubric (exec-equivalence via `info.expected.output`)
-  - **Note**: Single-turn scoring follows Tool-N1's binary functional-correctness approach, comparing tool output against expected results
+  - Rubric (single-turn): BinaryPassThroughRubric (AST or exec-equivalence via `info.expected`)
+  - **Note**: Single-turn scoring is a convenience adapter (non-BFCL-leaderboard) using official AST→Exec evaluator
 
 ## v4
 - Tools: `duckduckgo_search(keywords, max_results=10, region)` and `fetch_url_content(url, mode)`
@@ -23,12 +27,12 @@
 - Single-turn variants
   - B1: BFCLV4SingleTurnEnv (ToolEnv, max_turns=1)
   - B2: BFCLV4OracleSingleTurnEnv (SingleTurnEnv, max_turns=1) with optional oracle evidence injection (`info.evidence`)
-- Rubric: BFCLV4Rubric (normalized exact-match over strict JSON `{"answer": ...}`)
+- Rubric: BinaryPassThroughRubric (normalized exact-match over strict JSON `{"answer": ...}`)
   - **Note**: v4 grading uses only the `answer` field from the JSON response, matching the BFCL v4 specification's metric. Context and other fields are ignored.
-  - **Normalization**: Includes Unicode NFKC normalization, whitespace trimming, diacritic removal, and dash normalization for robust matching.
-  - **Score Modes**: 
-    - `"exec"` (default): Execution-equivalence scoring for functional correctness
-    - `"ast"`: AST-based scoring for leaderboard parity with some BFCL evaluations
+  - **Normalization**: BFCL-exact normalization (lowercase + punctuation stripping only: , . / - _ * ^ ( ) and quotes)
+  - **BFCL-Exact Features**:
+    - Binary scoring (0/1) based on exact answer match after normalization
+    - Environment-computed success with pass-through rubric
 
 ## Security & Determinism
 - URL allowlist: only http/https; block private/reserved IPs
@@ -229,10 +233,30 @@ vf-eval \
 
 ### Dataset Format Examples
 
-#### v3 Dataset Format
+#### v3 Dataset Format (Legacy - Global Checking)
 ```json
 {"prompt": [[{"role": "user", "content": "Set key=foo to bar"}]], "answer": "OK", "info": {"final_state": {"foo": "bar"}, "tool_sequence": ["set_kv"]}}
 {"prompt": [[{"role": "user", "content": "Add 2 and 3"}]], "answer": "5", "info": {"final_state": {"result": 5}, "tool_sequence": ["secret_add"]}}
+```
+
+#### v3 Dataset Format (BFCL-Exact - Per-Turn Checking)
+```json
+{
+  "prompt": [[{"role": "user", "content": "Complete the multi-step task"}]], 
+  "answer": "Task completed",
+  "info": {
+    "turns": [
+      {
+        "final_state": {"foo": "bar"},
+        "required_tools": ["set_kv"]
+      },
+      {
+        "final_state": {"result": 5},
+        "required_tools": ["secret_add"]
+      }
+    ]
+  }
+}
 ```
 
 #### v4 Dataset Format
