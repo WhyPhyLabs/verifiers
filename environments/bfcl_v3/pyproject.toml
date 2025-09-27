@@ -1,0 +1,55 @@
+[project]
+name = "bfcl-v3"
+description = "BFCL v3 environments for verifiers; full parity with bfcl_eval (AST + multi-turn)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+  { name = "Aria Bagheri", email = "aria@whyphy.ai" },
+  { name = "WhyPhy Labs AI, Inc." },
+]
+keywords = [
+  "bfcl",
+  "function-calling",
+  "multi-turn",
+  "evaluation",
+  "verifiers",
+  "benchmark",
+]
+tags = [
+  "bfcl",
+  "verifiers",
+  "env",
+  "ast",
+  "multi-turn",
+  "tools",
+  "evaluation",
+]
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "verifiers>=0.1.4",
+    "bfcl_eval @ git+https://github.com/ShishirPatil/gorilla.git@cd9429ccf3d4d04156affe883c495b3b047e6b64#subdirectory=berkeley-function-call-leaderboard",
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/PrimeIntellect-ai/verifiers"
+Repository = "https://github.com/PrimeIntellect-ai/verifiers"
+Issues = "https://github.com/PrimeIntellect-ai/verifiers/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
